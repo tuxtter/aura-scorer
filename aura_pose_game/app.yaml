@@ -1,0 +1,3 @@
+name: aura_pose_game
+type: pipeline
+description: Score a person's pose as an aura level in real time.
