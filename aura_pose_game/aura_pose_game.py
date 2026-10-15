@@ -1,8 +1,21 @@
 """Aura Pose Game - turn pose openness into a live aura score."""
 
+import json
 import math
+import os
+import select
 import signal
+import subprocess
+import sys
+import threading
 import time
+
+try:
+    import termios
+    import tty
+except ImportError:  # pragma: no cover
+    termios = None
+    tty = None
 
 import cv2
 import gi
@@ -25,6 +38,57 @@ from hailo_apps.python.pipeline_apps.pose_estimation.pose_estimation_pipeline im
 
 logger = get_logger(__name__)
 
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+BEST_SCORE_PATH = os.path.join(APP_DIR, ".aura_pose_best_score.json")
+
+
+def _load_best_score():
+    """Load the saved best score from a local JSON file."""
+    try:
+        if os.path.exists(BEST_SCORE_PATH):
+            with open(BEST_SCORE_PATH, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+                if isinstance(data, (int, float)):
+                    return float(data)
+    except Exception:
+        logger.debug("Could not load saved best score; defaulting to zero")
+    return 0.0
+
+
+def _save_best_score(score):
+    """Persist the best score to disk so it survives app restarts."""
+    try:
+        with open(BEST_SCORE_PATH, "w", encoding="utf-8") as handle:
+            json.dump(float(score), handle)
+    except Exception:
+        logger.debug("Could not save best score")
+
+
+def _play_sound(sound_name):
+    """Play a quick system sound without requiring a library dependency."""
+    try:
+        if sound_name == "success":
+            sound_path = "/System/Library/Sounds/Glass.aiff" if sys.platform == "darwin" else None
+        else:
+            sound_path = "/System/Library/Sounds/Pop.aiff" if sys.platform == "darwin" else None
+
+        if sys.platform == "darwin" and sound_path and os.path.exists(sound_path):
+            subprocess.run(["afplay", sound_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            return
+
+        if sys.platform == "linux":
+            if os.system("printf '\a' >/dev/console 2>/dev/null") == 0:
+                return
+            if os.system("paplay /usr/share/sounds/freedesktop/stereo/complete.oga >/dev/null 2>&1") == 0:
+                return
+            if os.system("play -q /usr/share/sounds/alsa/Front_Center.wav >/dev/null 2>&1") == 0:
+                return
+
+        print("\a", end="", flush=True)
+    except Exception:
+        logger.debug("Sound playback unavailable on this system")
+
+
 LEFT_SHOULDER, RIGHT_SHOULDER = 5, 6
 LEFT_ELBOW, RIGHT_ELBOW = 7, 8
 LEFT_WRIST, RIGHT_WRIST = 9, 10
@@ -41,17 +105,114 @@ POSE_CONNECTIONS = (
 )
 
 
+CHALLENGE_TARGETS = (
+    {"name": "STAR", "arm_span": 0.82, "shoulder_width": 0.30, "shoulder_to_hip": 0.48, "balance": 0.09},
+    {"name": "WARRIOR", "arm_span": 0.68, "shoulder_width": 0.25, "shoulder_to_hip": 0.42, "balance": 0.08},
+    {"name": "BALANCE", "arm_span": 0.60, "shoulder_width": 0.22, "shoulder_to_hip": 0.40, "balance": 0.05},
+)
+DIFFICULTY_CONFIG = {
+    "easy": {"threshold": 70.0, "round_duration": 35.0, "hold_time": 2.2},
+    "medium": {"threshold": 78.0, "round_duration": 30.0, "hold_time": 1.8},
+    "hard": {"threshold": 84.0, "round_duration": 25.0, "hold_time": 1.5},
+}
+
+
 class AuraGameCallback(app_callback_class):
-    """Stores the smoothed aura score and the latest pose."""
+    """Stores the smoothed aura score and the live game state."""
 
     def __init__(self):
         super().__init__()
         self.use_frame = True
         self.aura_score = 0.0
-        self.best_score = 0.0
+        self.best_score = _load_best_score()
         self.last_pose = None
         self.last_pose_norm = None
         self.last_update = time.monotonic()
+        self.difficulty = "medium"
+        self.combo = 0
+        self.challenge_index = 0
+        self.pose_hold_time = 0.0
+        self.round_time = 0.0
+        self.round_state = "countdown"
+        self.countdown = 3.0
+        self.status_message = "Get ready"
+        self.match_score = 0.0
+        self.challenge_name = CHALLENGE_TARGETS[0]["name"]
+        self.level = DIFFICULTY_CONFIG[self.difficulty]
+        self.game_state = "start"
+        self.start_countdown = 2.5
+        self.total_rounds_completed = 0
+        self.no_person_time = 0.0
+        self.final_score = 0.0
+
+    def cycle_difficulty(self):
+        """Rotate through difficulty presets while the app is running."""
+        order = ["easy", "medium", "hard"]
+        current_index = order.index(self.difficulty)
+        self.difficulty = order[(current_index + 1) % len(order)]
+        self.level = DIFFICULTY_CONFIG[self.difficulty]
+        self.status_message = f"Difficulty: {self.difficulty.upper()}"
+        logger.info("Switched aura difficulty to %s", self.difficulty)
+
+    def restart_game(self):
+        """Reset the gameplay loop and return to the start screen."""
+        self.aura_score = 0.0
+        self.combo = 0
+        self.challenge_index = 0
+        self.pose_hold_time = 0.0
+        self.round_time = 0.0
+        self.round_state = "countdown"
+        self.countdown = 3.0
+        self.status_message = "Get ready"
+        self.match_score = 0.0
+        self.challenge_name = CHALLENGE_TARGETS[0]["name"]
+        self.level = DIFFICULTY_CONFIG[self.difficulty]
+        self.game_state = "start"
+        self.start_countdown = 2.5
+        self.total_rounds_completed = 0
+        self.no_person_time = 0.0
+        self.final_score = 0.0
+        self.last_pose = None
+        self.last_pose_norm = None
+        self.last_update = time.monotonic()
+        logger.info("Restarted aura pose game")
+
+    def begin_round(self):
+        """Reset the timer and challenge state for a new round."""
+        self.round_state = "countdown"
+        self.countdown = 3.0
+        self.round_time = 0.0
+        self.pose_hold_time = 0.0
+        self.status_message = "Get ready"
+        self.challenge_name = CHALLENGE_TARGETS[self.challenge_index % len(CHALLENGE_TARGETS)]["name"]
+        self.level = DIFFICULTY_CONFIG[self.difficulty]
+
+    def trigger_game_over(self, reason="Stage failed"):
+        """Freeze the game and show the final overlay."""
+        self.game_state = "game_over"
+        self.final_score = self.aura_score
+        self.best_score = max(self.best_score, self.final_score)
+        _save_best_score(self.best_score)
+        self.status_message = reason
+        _play_sound("game_over")
+
+    def advance_round(self):
+        """Move to the next challenge and keep the combo alive."""
+        self.challenge_index = (self.challenge_index + 1) % len(CHALLENGE_TARGETS)
+        self.combo += 1
+        self.total_rounds_completed += 1
+        self.best_score = max(self.best_score, self.aura_score)
+        if self.total_rounds_completed >= 5:
+            self.game_state = "game_over"
+            self.final_score = self.aura_score
+            self.best_score = max(self.best_score, self.final_score)
+            _save_best_score(self.best_score)
+            self.status_message = "Stage cleared!"
+            _play_sound("success")
+            return
+        self.begin_round()
+        self.status_message = f"{self.challenge_name} ready"
+        _play_sound("success")
 
     def set_frame(self, frame):
         """Keep the display queue focused on the newest rendered frame."""
@@ -83,8 +244,8 @@ def _pixel_point(point, bbox, width, height):
     )
 
 
-def _score_pose(points, bbox):
-    """Return a 0-100 score from openness, arm span, and symmetry."""
+def _pose_metrics(points, bbox):
+    """Compute normalized pose metrics for scoring and target matching."""
     def distance(a, b):
         return math.hypot(points[a][0] - points[b][0], points[a][1] - points[b][1])
 
@@ -101,17 +262,45 @@ def _score_pose(points, bbox):
     center_offset = abs(shoulder_mid_x - wrist_mid_x) / box_width
     wrist_height_difference = abs(points[LEFT_WRIST][1] - points[RIGHT_WRIST][1]) / box_height
 
+    return {
+        "box_width": box_width,
+        "box_height": box_height,
+        "shoulder_width": shoulder_width,
+        "arm_span": arm_span,
+        "shoulder_to_hip": shoulder_to_hip,
+        "center_offset": center_offset,
+        "wrist_height_difference": wrist_height_difference,
+    }
+
+
+def _score_pose(points, bbox):
+    """Return a 0-100 score from openness, arm span, and symmetry."""
+    metrics = _pose_metrics(points, bbox)
     openness = 100.0 * (
-        0.45 * np.clip((arm_span - 0.25) / 0.85, 0.0, 1.0)
-        + 0.30 * np.clip((shoulder_width - 0.12) / 0.35, 0.0, 1.0)
-        + 0.25 * np.clip((shoulder_to_hip - 0.18) / 0.35, 0.0, 1.0)
+        0.45 * np.clip((metrics["arm_span"] - 0.25) / 0.85, 0.0, 1.0)
+        + 0.30 * np.clip((metrics["shoulder_width"] - 0.12) / 0.35, 0.0, 1.0)
+        + 0.25 * np.clip((metrics["shoulder_to_hip"] - 0.18) / 0.35, 0.0, 1.0)
     )
     symmetry = 100.0 * (
         1.0
-        - 0.55 * np.clip(center_offset / 0.35, 0.0, 1.0)
-        - 0.45 * np.clip(wrist_height_difference / 0.45, 0.0, 1.0)
+        - 0.55 * np.clip(metrics["center_offset"] / 0.35, 0.0, 1.0)
+        - 0.45 * np.clip(metrics["wrist_height_difference"] / 0.45, 0.0, 1.0)
     )
     return float(np.clip(0.7 * openness + 0.3 * symmetry, 0.0, 100.0))
+
+
+def _target_match_score(points, bbox, target):
+    """Compare the current pose against a target challenge pose."""
+    metrics = _pose_metrics(points, bbox)
+    arm_score = 100.0 * np.clip(1.0 - abs(metrics["arm_span"] - target["arm_span"]) / 0.55, 0.0, 1.0)
+    shoulder_score = 100.0 * np.clip(
+        1.0 - abs(metrics["shoulder_width"] - target["shoulder_width"]) / 0.32, 0.0, 1.0
+    )
+    posture_score = 100.0 * np.clip(
+        1.0 - abs(metrics["shoulder_to_hip"] - target["shoulder_to_hip"]) / 0.35, 0.0, 1.0
+    )
+    balance_score = 100.0 * np.clip(1.0 - metrics["center_offset"] / max(target["balance"], 0.05), 0.0, 1.0)
+    return float(np.clip(0.45 * arm_score + 0.25 * shoulder_score + 0.20 * posture_score + 0.10 * balance_score, 0.0, 100.0))
 
 
 def _pose_motion(prev_points, points, bbox):
@@ -149,6 +338,33 @@ def _pose_confidence(detection, points, bbox, prev_points=None):
     return float(np.clip(0.5 * det_conf + 0.3 * visibility + 0.2 * stability, 0.0, 1.0))
 
 
+def _draw_stage_background(width, height):
+    """Create a stylized stage backdrop behind the live pose output."""
+    stage = np.full((height, width, 3), (18, 22, 42), dtype=np.uint8)
+    center_x = width // 2
+    center_y = int(height * 0.32)
+
+    for x in range(width):
+        glow = int((x / max(width - 1, 1)) * 55)
+        stage[:, x, 0] = np.clip(stage[:, x, 0] + glow, 0, 255)
+        stage[:, x, 2] = np.clip(stage[:, x, 2] + int((1.0 - x / max(width, 1)) * 18), 0, 255)
+
+    cv2.ellipse(stage, (center_x, center_y), (int(width * 0.28), int(height * 0.19)), 0, 0, 360,
+                (72, 82, 140), 2)
+    cv2.ellipse(stage, (center_x, center_y), (int(width * 0.19), int(height * 0.12)), 0, 0, 360,
+                (255, 175, 90), 2)
+    cv2.ellipse(stage, (center_x, int(height * 0.82)), (int(width * 0.42), int(height * 0.22)),
+                0, 0, 360, (30, 34, 58), -1)
+    cv2.ellipse(stage, (center_x, int(height * 0.82)), (int(width * 0.34), int(height * 0.16)),
+                0, 0, 360, (72, 78, 120), 2)
+
+    for ring in range(3):
+        radius = int(width * (0.14 + ring * 0.10))
+        cv2.circle(stage, (center_x, center_y), radius, (80 + ring * 25, 80 + ring * 15, 110), 1)
+
+    return stage
+
+
 def _aura_colour(score):
     """Map a score to a warm-to-cool aura colour."""
     hue = int(135 - (min(score, 100.0) / 100.0) * 135)
@@ -156,10 +372,40 @@ def _aura_colour(score):
     return tuple(int(value) for value in cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)[0, 0])
 
 
-def _draw_hud(image, score, best_score, width, height):
+def _draw_target_pose(image, challenge_name, width, height):
+    """Draw a dim silhouette of the required stage challenge to guide the player."""
+    cx = width // 2
+    cy = int(height * 0.34)
+    target = CHALLENGE_TARGETS[CHALLENGE_TARGETS.index(next(item for item in CHALLENGE_TARGETS if item["name"] == challenge_name))]
+    scale = 1.0
+    if target["name"] == "STAR":
+        scale = 1.15
+    elif target["name"] == "BALANCE":
+        scale = 0.9
+
+    points = {
+        LEFT_SHOULDER: (int(cx - 80 * scale), int(cy - 25)),
+        RIGHT_SHOULDER: (int(cx + 80 * scale), int(cy - 25)),
+        LEFT_ELBOW: (int(cx - 155 * scale), int(cy + 80 * scale)),
+        RIGHT_ELBOW: (int(cx + 155 * scale), int(cy + 80 * scale)),
+        LEFT_WRIST: (int(cx - 195 * scale), int(cy + 175 * scale)),
+        RIGHT_WRIST: (int(cx + 195 * scale), int(cy + 175 * scale)),
+        LEFT_HIP: (int(cx - 55 * scale), int(cy + 120 * scale)),
+        RIGHT_HIP: (int(cx + 55 * scale), int(cy + 120 * scale)),
+    }
+    colour = (110, 130, 200)
+    for start, end in POSE_CONNECTIONS:
+        cv2.line(image, points[start], points[end], colour, 2, cv2.LINE_AA)
+    for point in points.values():
+        cv2.circle(image, point, 5, colour, -1)
+    cv2.putText(image, f"TARGET: {challenge_name}", (width - 230, 170),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
+
+
+def _draw_hud(image, score, best_score, width, height, challenge_name, combo, status_message, timer, difficulty):
     colour = _aura_colour(score)
-    cv2.rectangle(image, (20, 20), (390, 178), (18, 22, 42), -1)
-    cv2.rectangle(image, (20, 20), (390, 178), colour, 2)
+    cv2.rectangle(image, (20, 20), (390, 210), (18, 22, 42), -1)
+    cv2.rectangle(image, (20, 20), (390, 210), colour, 2)
     cv2.putText(image, "AURA METER", (42, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.8, colour, 2)
     cv2.putText(image, f"{score:05.1f} / 100", (42, 105),
                 cv2.FONT_HERSHEY_SIMPLEX, 1.15, (255, 255, 255), 2)
@@ -167,15 +413,51 @@ def _draw_hud(image, score, best_score, width, height):
     cv2.rectangle(image, (42, 122), (42 + int(323 * score / 100), 143), colour, -1)
     cv2.putText(image, f"BEST {best_score:05.1f}", (42, 168),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 230), 1)
+    cv2.putText(image, f"COMBO x{combo}", (42, 196),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.53, (255, 210, 120), 1)
+
     label = "MAXIMUM AURA" if score >= 85 else "STRONG AURA" if score >= 65 else "BUILD AURA"
     cv2.putText(image, label, (width - 260, 48),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, colour, 2)
+    cv2.putText(image, challenge_name, (width - 220, 82),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (245, 245, 250), 2)
+    cv2.putText(image, difficulty.upper(), (width - 200, 108),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 210, 255), 1)
+    cv2.putText(image, status_message, (width - 290, 120),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1)
+    cv2.putText(image, f"{timer:04.1f}s", (width - 100, 160),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, colour, 2)
     cv2.putText(image, "Spread out and balance your pose!", (width - 390, height - 25),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (235, 235, 235), 1)
 
 
+def _draw_start_screen(image, width, height, difficulty, countdown, best_score):
+    """Render the intro screen before the round starts."""
+    overlay = image.copy()
+    cv2.rectangle(overlay, (60, 60), (width - 60, height - 60), (16, 19, 32), -1)
+    cv2.rectangle(overlay, (60, 60), (width - 60, height - 60), (255, 180, 90), 2)
+    cv2.putText(overlay, "AURA POSE STAGE", (100, 150), cv2.FONT_HERSHEY_SIMPLEX, 1.3, (255, 255, 255), 2)
+    cv2.putText(overlay, f"DIFFICULTY: {difficulty.upper()}", (100, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 220, 140), 2)
+    cv2.putText(overlay, "Match the target pose to build your aura.", (100, 285), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
+    cv2.putText(overlay, f"BEST SCORE: {best_score:05.1f}", (100, 330), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 220), 1)
+    cv2.putText(overlay, f"STARTING IN {max(0.0, countdown):02.1f}s", (100, 390), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (110, 200, 255), 2)
+    return overlay
+
+
+def _draw_game_over_screen(image, width, height, score, best_score):
+    """Render the final summary when the player clears or fails the stage."""
+    overlay = image.copy()
+    cv2.rectangle(overlay, (80, 80), (width - 80, height - 80), (12, 14, 20), -1)
+    cv2.rectangle(overlay, (80, 80), (width - 80, height - 80), (255, 120, 120), 2)
+    cv2.putText(overlay, "STAGE COMPLETE", (110, 170), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 2)
+    cv2.putText(overlay, f"FINAL AURA: {score:05.1f}", (110, 235), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 200, 90), 2)
+    cv2.putText(overlay, f"BEST SCORE: {best_score:05.1f}", (110, 290), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 220, 255), 2)
+    cv2.putText(overlay, "Reset the app to play again.", (110, 350), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
+    return overlay
+
+
 def app_callback(element, buffer, user_data):
-    """Extract pose landmarks, update the score, and render the game overlay."""
+    """Extract pose landmarks, update the score, and render the challenge HUD."""
     pad = element.get_static_pad("src")
     fmt, width, height = get_caps_from_pad(pad)
     if not user_data.use_frame or not fmt or not width or not height:
@@ -184,6 +466,40 @@ def app_callback(element, buffer, user_data):
     frame = get_numpy_from_buffer(buffer, fmt, width, height)
     if frame is None:
         return Gst.FlowReturn.OK
+
+    now = time.monotonic()
+    frame_delta = max(0.0, now - user_data.last_update)
+
+    if user_data.game_state == "start":
+        user_data.start_countdown -= frame_delta
+        if user_data.start_countdown <= 0.0:
+            user_data.game_state = "playing"
+            user_data.begin_round()
+            user_data.status_message = "Challenge live"
+        user_data.last_update = now
+    elif user_data.game_state == "game_over":
+        user_data.last_update = now
+    else:
+        if user_data.round_state == "countdown":
+            user_data.countdown -= frame_delta
+            user_data.status_message = f"{max(1, int(math.ceil(user_data.countdown)))}..."
+            if user_data.countdown <= 0.0:
+                user_data.round_state = "playing"
+                user_data.round_time = 0.0
+                user_data.status_message = "Challenge live"
+        elif user_data.round_state == "playing":
+            user_data.round_time += frame_delta
+            user_data.level = DIFFICULTY_CONFIG[user_data.difficulty]
+            challenge_timeout = user_data.level["round_duration"]
+            if user_data.round_time >= challenge_timeout:
+                user_data.round_state = "finished"
+                user_data.status_message = "Round complete!"
+                user_data.trigger_game_over("Time up")
+            else:
+                user_data.status_message = f"{challenge_timeout - user_data.round_time:04.1f}s left"
+        else:
+            user_data.status_message = "Round complete"
+        user_data.last_update = now
 
     roi = hailo.get_roi_from_buffer(buffer)
     detections = [
@@ -204,21 +520,45 @@ def app_callback(element, buffer, user_data):
                 _pixel_point(point, bbox, width, height)
                 for point in landmark_sets[0].get_points()
             ]
-            pose_score = _score_pose(normalized_points, bbox)
-            motion_score = _pose_motion(user_data.last_pose_norm, normalized_points, bbox)
-            confidence = _pose_confidence(detection, normalized_points, bbox, user_data.last_pose_norm)
-            dynamic_score = confidence * (0.65 * pose_score + 0.35 * motion_score)
-            smoothing = np.clip(0.10 + 0.30 * confidence, 0.10, 0.40)
-            user_data.aura_score = (1.0 - smoothing) * user_data.aura_score + smoothing * dynamic_score
-            user_data.best_score = max(user_data.best_score, user_data.aura_score)
+            if user_data.game_state == "playing":
+                pose_score = _score_pose(normalized_points, bbox)
+                motion_score = _pose_motion(user_data.last_pose_norm, normalized_points, bbox)
+                confidence = _pose_confidence(detection, normalized_points, bbox, user_data.last_pose_norm)
+                challenge_target = CHALLENGE_TARGETS[user_data.challenge_index]
+                match_score = _target_match_score(normalized_points, bbox, challenge_target)
+                dynamic_score = confidence * (0.45 * pose_score + 0.25 * motion_score + 0.30 * match_score)
+                smoothing = np.clip(0.12 + 0.28 * confidence, 0.12, 0.42)
+                user_data.aura_score = (1.0 - smoothing) * user_data.aura_score + smoothing * dynamic_score
+                if match_score >= user_data.level["threshold"]:
+                    user_data.pose_hold_time += frame_delta
+                    if user_data.pose_hold_time >= user_data.level["hold_time"]:
+                        user_data.status_message = f"Perfect {challenge_target['name']}!"
+                        user_data.aura_score = min(100.0, user_data.aura_score + 8.0)
+                        user_data.pose_hold_time = 0.0
+                        user_data.advance_round()
+                else:
+                    user_data.pose_hold_time = 0.0
+
+                user_data.best_score = max(user_data.best_score, user_data.aura_score)
             pose = points
             user_data.last_pose_norm = normalized_points
+    else:
+        if user_data.game_state == "playing":
+            user_data.no_person_time += frame_delta
+            if user_data.no_person_time > 2.5:
+                user_data.trigger_game_over("No pose detected")
+        else:
+            user_data.no_person_time = 0.0
 
     if pose is not None:
         user_data.last_pose = pose
+        user_data.no_person_time = 0.0
 
     output = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-    if user_data.last_pose is not None:
+    stage_background = _draw_stage_background(width, height)
+    output = cv2.addWeighted(stage_background, 0.55, output, 0.45, 0)
+
+    if user_data.game_state == "playing" and user_data.last_pose is not None:
         colour = _aura_colour(user_data.aura_score)
         for start, end in POSE_CONNECTIONS:
             cv2.line(output, user_data.last_pose[start], user_data.last_pose[end], colour, 3, cv2.LINE_AA)
@@ -226,7 +566,25 @@ def app_callback(element, buffer, user_data):
             cv2.circle(output, point, 6, (255, 255, 255), -1, cv2.LINE_AA)
             cv2.circle(output, point, 8, colour, 2, cv2.LINE_AA)
 
-    _draw_hud(output, user_data.aura_score, user_data.best_score, width, height)
+    if user_data.game_state == "playing":
+        _draw_target_pose(output, user_data.challenge_name, width, height)
+        _draw_hud(
+            output,
+            user_data.aura_score,
+            user_data.best_score,
+            width,
+            height,
+            user_data.challenge_name,
+            user_data.combo,
+            user_data.status_message,
+            max(0.0, user_data.level["round_duration"] - user_data.round_time),
+            user_data.difficulty,
+        )
+    elif user_data.game_state == "start":
+        output = _draw_start_screen(output, width, height, user_data.difficulty, user_data.start_countdown, user_data.best_score)
+    else:
+        output = _draw_game_over_screen(output, width, height, user_data.aura_score, user_data.best_score)
+
     user_data.set_frame(output)
     return Gst.FlowReturn.OK
 
@@ -240,14 +598,73 @@ class AuraPoseGame(GStreamerPoseEstimationApp):
         user_data.use_frame = True
 
 
+class KeyboardController(threading.Thread):
+    """Listen for local keyboard controls while the game runs."""
+
+    def __init__(self, user_data):
+        super().__init__(daemon=True)
+        self.user_data = user_data
+        self.running = True
+
+    def _handle_key(self, key):
+        if key in ("d", "D"):
+            self.user_data.cycle_difficulty()
+        elif key in ("r", "R"):
+            self.user_data.restart_game()
+        elif key in ("q", "Q"):
+            self.user_data.trigger_game_over("Quit requested")
+
+    def run(self):
+        if hasattr(sys.stdin, "isatty") and not sys.stdin.isatty():
+            return
+
+        if os.name == "nt":
+            import msvcrt
+
+            while self.running:
+                if msvcrt.kbhit():
+                    self._handle_key(msvcrt.getwch().lower())
+                time.sleep(0.05)
+            return
+
+        if termios is None or tty is None:
+            return
+
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            while self.running:
+                ready, _, _ = select.select([sys.stdin], [], [], 0.1)
+                if ready:
+                    key = sys.stdin.read(1)
+                    if key:
+                        self._handle_key(key.lower())
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
 def main():
     """Start the aura pose game."""
     parser = get_pipeline_parser()
+    parser.add_argument(
+        "--difficulty",
+        choices=["easy", "medium", "hard"],
+        default="medium",
+        help="Set the aura challenge difficulty.",
+    )
+    args = parser.parse_args()
+
     user_data = AuraGameCallback()
+    user_data.difficulty = args.difficulty
+    user_data.level = DIFFICULTY_CONFIG[user_data.difficulty]
+    keyboard = KeyboardController(user_data)
+    keyboard.start()
     app = AuraPoseGame(app_callback, user_data, parser)
 
     def handle_sigint(_signal_number, _frame):
         logger.info("Stopping aura pose game")
+        keyboard.running = False
         app.stop()
 
     signal.signal(signal.SIGINT, handle_sigint)
