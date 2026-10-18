@@ -48,6 +48,7 @@ logger = get_logger(__name__)
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 BEST_SCORE_PATH = os.path.join(APP_DIR, ".aura_pose_best_score.json")
+STAGE_BACKGROUND_PATH = os.path.join(os.path.dirname(APP_DIR), "pantano.png")
 
 
 def _load_best_score():
@@ -252,32 +253,18 @@ def _pose_confidence(detection, points, bbox):
     return float(np.clip(0.7 * det_conf + 0.3 * visibility, 0.0, 1.0))
 
 
+@lru_cache(maxsize=1)
+def _load_stage_background():
+    stage = cv2.imread(STAGE_BACKGROUND_PATH, cv2.IMREAD_COLOR)
+    if stage is None:
+        raise FileNotFoundError(f"Could not load stage background: {STAGE_BACKGROUND_PATH}")
+    return stage
+
+
 @lru_cache(maxsize=2)
 def _draw_stage_background(width, height):
-    """Create (once per resolution) a stylized stage backdrop behind the live pose output."""
-    stage = np.full((height, width, 3), (18, 22, 42), dtype=np.uint8)
-    center_x = width // 2
-    center_y = int(height * 0.32)
-
-    xs = np.arange(width, dtype=np.float32) / max(width - 1, 1)
-    stage[:, :, 0] = np.clip(18 + (xs * 55).astype(np.int32), 0, 255).astype(np.uint8)[None, :]
-    stage[:, :, 2] = np.clip(
-        42 + ((1.0 - np.arange(width, dtype=np.float32) / max(width, 1)) * 18).astype(np.int32), 0, 255
-    ).astype(np.uint8)[None, :]
-
-    cv2.ellipse(stage, (center_x, center_y), (int(width * 0.28), int(height * 0.19)), 0, 0, 360,
-                (72, 82, 140), 2)
-    cv2.ellipse(stage, (center_x, center_y), (int(width * 0.19), int(height * 0.12)), 0, 0, 360,
-                (255, 175, 90), 2)
-    cv2.ellipse(stage, (center_x, int(height * 0.82)), (int(width * 0.42), int(height * 0.22)),
-                0, 0, 360, (30, 34, 58), -1)
-    cv2.ellipse(stage, (center_x, int(height * 0.82)), (int(width * 0.34), int(height * 0.16)),
-                0, 0, 360, (72, 78, 120), 2)
-
-    for ring in range(3):
-        radius = int(width * (0.14 + ring * 0.10))
-        cv2.circle(stage, (center_x, center_y), radius, (80 + ring * 25, 80 + ring * 15, 110), 1)
-
+    """Scale the supplied stage background for the current frame size."""
+    stage = cv2.resize(_load_stage_background(), (width, height), interpolation=cv2.INTER_LINEAR)
     stage.setflags(write=False)
     return stage
 

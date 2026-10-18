@@ -5,6 +5,7 @@
 Aura Pose Game uses a pose-estimation pipeline to track a dancer and turn
 movement into a live score from 0 to 100. It keeps the camera feed visible and
 overlays the detected skeleton and aura meter. There are no named target poses.
+The stage background is loaded from `pantano.png` in the repository root.
 
 The score rewards movement intensity and involving multiple body regions
 (left arm, right arm, and torso). It is smoothed over time, so sustained,
