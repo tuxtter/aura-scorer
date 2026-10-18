@@ -7,7 +7,9 @@ movement into a live score from 0 to 100. It keeps the camera feed visible and
 overlays the detected skeleton and aura meter. There are no named target poses.
 
 The score rewards movement intensity and involving multiple body regions
-(left arm, right arm, and torso). It is smoothed over time, so sustained,
+(left arm, right arm, torso, plus head and legs at lower weight). Head and
+leg regions only count while their keypoints are confidently visible, so
+upper-body-only framing is not penalized (the HUD shows `--` for them). It is smoothed over time, so sustained,
 varied dancing builds aura while standing still lets the score fade. Detection
 confidence and landmark visibility also affect the score. Difficulty changes
 how much movement is needed to reach a high score. The HUD shows per-region

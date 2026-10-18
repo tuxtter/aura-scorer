@@ -109,6 +109,23 @@ LEFT_SHOULDER, RIGHT_SHOULDER = 5, 6
 LEFT_ELBOW, RIGHT_ELBOW = 7, 8
 LEFT_WRIST, RIGHT_WRIST = 9, 10
 LEFT_HIP, RIGHT_HIP = 11, 12
+LEFT_KNEE, RIGHT_KNEE = 13, 14
+LEFT_ANKLE, RIGHT_ANKLE = 15, 16
+HEAD_POINTS = (0, 1, 2, 3, 4)
+# (name, keypoints, weight, optional). Optional regions only count when visible.
+REGIONS = (
+    ("left_arm", (LEFT_SHOULDER, LEFT_ELBOW, LEFT_WRIST), 1.0, False),
+    ("right_arm", (RIGHT_SHOULDER, RIGHT_ELBOW, RIGHT_WRIST), 1.0, False),
+    ("torso", (LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_HIP, RIGHT_HIP), 1.0, False),
+    ("head", HEAD_POINTS, 0.5, True),
+    ("left_leg", (LEFT_HIP, LEFT_KNEE, LEFT_ANKLE), 0.75, True),
+    ("right_leg", (RIGHT_HIP, RIGHT_KNEE, RIGHT_ANKLE), 0.75, True),
+)
+KEYPOINT_MIN_CONFIDENCE = 0.4
+
+
+def _empty_breakdown():
+    return {name: 0.0 for name, _, _, _ in REGIONS}
 POSE_CONNECTIONS = (
     (LEFT_SHOULDER, RIGHT_SHOULDER),
     (LEFT_SHOULDER, LEFT_ELBOW),
@@ -118,6 +135,10 @@ POSE_CONNECTIONS = (
     (LEFT_SHOULDER, LEFT_HIP),
     (RIGHT_SHOULDER, RIGHT_HIP),
     (LEFT_HIP, RIGHT_HIP),
+    (LEFT_HIP, LEFT_KNEE),
+    (LEFT_KNEE, LEFT_ANKLE),
+    (RIGHT_HIP, RIGHT_KNEE),
+    (RIGHT_KNEE, RIGHT_ANKLE),
 )
 
 
@@ -145,7 +166,7 @@ class AuraGameCallback(app_callback_class):
         self.last_pose_norm = None
         self.last_update = time.monotonic()
         self.movement_noise_floor = 0.0
-        self.activity_breakdown = {"left_arm": 0.0, "right_arm": 0.0, "torso": 0.0}
+        self.activity_breakdown = _empty_breakdown()
         self.tracking_confidence = 0.0
         self.difficulty = "medium"
         self.status_message = "Dance to build aura"
@@ -171,7 +192,7 @@ class AuraGameCallback(app_callback_class):
         self.last_pose_norm = None
         self.last_update = time.monotonic()
         self.movement_noise_floor = 0.0
-        self.activity_breakdown = {"left_arm": 0.0, "right_arm": 0.0, "torso": 0.0}
+        self.activity_breakdown = _empty_breakdown()
         self.tracking_confidence = 0.0
         for player in self.duel_players:
             player.reset()
@@ -228,7 +249,7 @@ class DuelPlayerState:
         self.last_pose_norm = None
         self.center_x = None
         self.movement_noise_floor = 0.0
-        self.activity_breakdown = {"left_arm": 0.0, "right_arm": 0.0, "torso": 0.0}
+        self.activity_breakdown = _empty_breakdown()
         self.tracking_confidence = 0.0
 
 
@@ -263,19 +284,20 @@ def _smooth_pose_points(prev_points, points, frame_delta):
     ]
 
 
-def _dance_motion_score(prev_points, points, bbox, frame_delta, difficulty, noise_floor):
-    """Score normalized movement and return per-region activity and noise."""
+def _dance_motion_score(prev_points, points, bbox, frame_delta, difficulty, noise_floor,
+                        visible=None):
+    """Score normalized movement; return per-region activity (None if unseen) and noise."""
     if prev_points is None or frame_delta <= 0.0:
-        return 0.0, {"left_arm": 0.0, "right_arm": 0.0, "torso": 0.0}, noise_floor
+        return 0.0, _empty_breakdown(), noise_floor
 
-    regions = (
-        ("left_arm", (LEFT_SHOULDER, LEFT_ELBOW, LEFT_WRIST)),
-        ("right_arm", (RIGHT_SHOULDER, RIGHT_ELBOW, RIGHT_WRIST)),
-        ("torso", (LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_HIP, RIGHT_HIP)),
-    )
+    if visible is None:
+        visible = [True] * len(points)
     body_scale = max((bbox.width() + bbox.height()) / 2.0, 1e-6)
     raw_speeds = {}
-    for name, region in regions:
+    weights = {}
+    for name, region, weight, optional in REGIONS:
+        if optional and not all(visible[index] for index in region):
+            continue
         motion = sum(
             math.hypot(
                 points[index][0] - prev_points[index][0],
@@ -284,9 +306,14 @@ def _dance_motion_score(prev_points, points, bbox, frame_delta, difficulty, nois
             for index in region
         ) / len(region)
         raw_speeds[name] = motion / body_scale / frame_delta
+        weights[name] = weight
+    total_weight = sum(weights.values())
+
+    def weighted(values):
+        return sum(values[name] * weights[name] for name in values) / total_weight
 
     config = DIFFICULTY_CONFIG[difficulty]
-    movement = sum(raw_speeds.values()) / len(raw_speeds)
+    movement = weighted(raw_speeds)
     if movement < config["min_movement"] * 1.5:
         noise_alpha = 1.0 - math.exp(-frame_delta / NOISE_CALIBRATION_SECONDS)
         noise_floor += noise_alpha * (movement - noise_floor)
@@ -298,22 +325,23 @@ def _dance_motion_score(prev_points, points, bbox, frame_delta, difficulty, nois
         name: max(0.0, speed - dead_zone)
         for name, speed in raw_speeds.items()
     }
-    movement = sum(region_speeds.values()) / len(region_speeds)
+    movement = weighted(region_speeds)
     activity_score = 100.0 * np.clip(
         (movement - movement_threshold) / (full_movement - movement_threshold),
         0.0,
         1.0,
     )
-    active_regions = sum(speed >= movement_threshold for speed in region_speeds.values())
-    variety_factor = 0.7 + 0.3 * active_regions / len(regions)
-    region_scores = {
-        name: float(100.0 * np.clip(
+    active_weight = sum(
+        weights[name] for name, speed in region_speeds.items() if speed >= movement_threshold
+    )
+    variety_factor = 0.7 + 0.3 * active_weight / total_weight
+    region_scores = {name: None for name, _, _, _ in REGIONS}
+    for name, speed in region_speeds.items():
+        region_scores[name] = float(100.0 * np.clip(
             (speed - movement_threshold) / (full_movement - movement_threshold),
             0.0,
             1.0,
         ))
-        for name, speed in region_speeds.items()
-    }
     return float(activity_score * variety_factor), region_scores, noise_floor
 
 
@@ -337,6 +365,11 @@ def _update_player_score(player, detection, frame_delta, difficulty, width, heig
         _normalized_point(point, bbox)
         for point in landmarks
     ]
+    visible = [
+        point.confidence() >= KEYPOINT_MIN_CONFIDENCE
+        and 0.0 <= point.x() <= 1.0 and 0.0 <= point.y() <= 1.0
+        for point in landmarks
+    ]
     normalized_points = _smooth_pose_points(player.last_pose_norm, raw_points, frame_delta)
     dance_score, activity, player.movement_noise_floor = _dance_motion_score(
         player.last_pose_norm,
@@ -345,6 +378,7 @@ def _update_player_score(player, detection, frame_delta, difficulty, width, heig
         frame_delta,
         difficulty,
         player.movement_noise_floor,
+        visible,
     )
     confidence = _pose_confidence(detection, normalized_points, bbox)
     confidence_factor = float(np.clip(confidence / 0.5, 0.0, 1.0))
@@ -367,7 +401,7 @@ def _update_player_score(player, detection, frame_delta, difficulty, width, heig
 def _decay_player_score(player, frame_delta):
     player.last_pose = None
     player.last_pose_norm = None
-    player.activity_breakdown = {"left_arm": 0.0, "right_arm": 0.0, "torso": 0.0}
+    player.activity_breakdown = _empty_breakdown()
     player.tracking_confidence = 0.0
     player.aura_score *= math.exp(-frame_delta / MISSING_POSE_DECAY_SECONDS)
 
@@ -433,8 +467,8 @@ def _aura_colour(score):
 def _draw_hud(image, score, best_score, width, height, status_message, difficulty,
               activity_breakdown, tracking_confidence):
     colour = _aura_colour(score)
-    cv2.rectangle(image, (20, 20), (390, 270), (18, 22, 42), -1)
-    cv2.rectangle(image, (20, 20), (390, 270), colour, 2)
+    cv2.rectangle(image, (20, 20), (390, 340), (18, 22, 42), -1)
+    cv2.rectangle(image, (20, 20), (390, 340), colour, 2)
     cv2.putText(image, "AURA METER", (42, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.8, colour, 2)
     cv2.putText(image, f"{score:05.1f} / 100", (42, 105),
                 cv2.FONT_HERSHEY_SIMPLEX, 1.15, (255, 255, 255), 2)
@@ -442,16 +476,18 @@ def _draw_hud(image, score, best_score, width, height, status_message, difficult
     cv2.rectangle(image, (42, 122), (42 + int(323 * score / 100), 143), colour, -1)
     cv2.putText(image, f"BEST {best_score:05.1f}", (42, 168),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 230), 1)
-    for index, (name, label) in enumerate(
-        (("left_arm", "L ARM"), ("right_arm", "R ARM"), ("torso", "TORSO"))
-    ):
+    labels = (("left_arm", "L ARM"), ("right_arm", "R ARM"), ("torso", "TORSO"),
+              ("head", "HEAD"), ("left_leg", "L LEG"), ("right_leg", "R LEG"))
+    for index, (name, label) in enumerate(labels):
         y = 193 + index * 23
-        region_score = activity_breakdown[name]
-        cv2.putText(image, f"{label} {region_score:3.0f}", (42, y),
+        region_score = activity_breakdown.get(name)
+        text = "--" if region_score is None else f"{region_score:3.0f}"
+        cv2.putText(image, f"{label} {text}", (42, y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (220, 220, 230), 1)
         cv2.rectangle(image, (145, y - 11), (365, y - 3), (65, 65, 85), -1)
-        cv2.rectangle(image, (145, y - 11), (145 + int(220 * region_score / 100), y - 3),
-                      colour, -1)
+        if region_score is not None:
+            cv2.rectangle(image, (145, y - 11), (145 + int(220 * region_score / 100), y - 3),
+                          colour, -1)
     label = "MAXIMUM AURA" if score >= 85 else "STRONG AURA" if score >= 65 else "BUILD AURA"
     cv2.putText(image, "DANCE AURA", (width - 260, 48),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, colour, 2)
@@ -468,34 +504,29 @@ def _draw_hud(image, score, best_score, width, height, status_message, difficult
 
 
 def _draw_duel_hud(image, players, width, height):
-    card_width = max(1, (width - 60) // 2)
+    """Compact translucent score cards in the top corners."""
+    card_width = max(150, min(190, width // 4))
+    card_height = 62
+    margin = 10
+    overlay = image.copy()
+    for index in range(len(players)):
+        x = margin if index == 0 else width - card_width - margin
+        cv2.rectangle(overlay, (x, margin), (x + card_width, margin + card_height), (18, 22, 42), -1)
+    cv2.addWeighted(overlay, 0.45, image, 0.55, 0, image)
     for index, player in enumerate(players):
-        x = 20 + index * (card_width + 20)
+        x = margin if index == 0 else width - card_width - margin
         colour = (255, 170, 70) if index == 0 else (90, 220, 255)
-        cv2.rectangle(image, (x, 20), (x + card_width, 190), (18, 22, 42), -1)
-        cv2.rectangle(image, (x, 20), (x + card_width, 190), colour, 2)
-        cv2.putText(image, player.name, (x + 16, 52),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, colour, 2)
-        cv2.putText(image, f"AURA {player.aura_score:05.1f}", (x + 16, 88),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
-        cv2.putText(image, f"BEST {player.best_score:05.1f}", (x + 16, 116),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (220, 220, 230), 1)
-        cv2.rectangle(image, (x + 16, 130), (x + card_width - 16, 146), (65, 65, 85), -1)
-        bar_width = max(0, int((card_width - 32) * player.aura_score / 100))
-        cv2.rectangle(image, (x + 16, 130), (x + 16 + bar_width, 146), colour, -1)
-        regions = player.activity_breakdown
-        cv2.putText(
-            image,
-            f"L {regions['left_arm']:.0f}  R {regions['right_arm']:.0f}  T {regions['torso']:.0f}"
-            f"   TRACK {player.tracking_confidence * 100:.0f}%",
-            (x + 16, 174),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.38,
-            (220, 220, 230),
-            1,
-        )
-    cv2.putText(image, "Q: end match", (width // 2 - 60, height - 20),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (240, 240, 240), 1)
+        cv2.rectangle(image, (x, margin), (x + card_width, margin + card_height), colour, 1)
+        cv2.putText(image, f"{player.name}  {player.aura_score:04.1f}", (x + 8, margin + 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(image, f"BEST {player.best_score:04.1f}", (x + 8, margin + 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (220, 220, 230), 1)
+        bar_x, bar_y, bar_w = x + 8, margin + 48, card_width - 16
+        cv2.rectangle(image, (bar_x, bar_y), (bar_x + bar_w, bar_y + 6), (65, 65, 85), -1)
+        fill = max(0, min(bar_w, int(bar_w * player.aura_score / 100)))
+        cv2.rectangle(image, (bar_x, bar_y), (bar_x + fill, bar_y + 6), colour, -1)
+    cv2.putText(image, "Q: end", (width - 60, height - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (240, 240, 240), 1)
 
 
 def _draw_game_over_screen(image, width, height, score, best_score, reason):
@@ -704,13 +735,13 @@ def main():
     user_data = AuraGameCallback(mode=args.mode)
     user_data.difficulty = args.difficulty
     app = AuraPoseGame(app_callback, user_data, parser)
-    keyboard = KeyboardController(user_data, app.shutdown)
+    keyboard = KeyboardController(user_data, app.stop)
     keyboard.start()
 
     def handle_sigint(_signal_number, _frame):
         logger.info("Stopping aura pose game")
         keyboard.running = False
-        app.shutdown()
+        app.stop()
 
     signal.signal(signal.SIGINT, handle_sigint)
     try:
