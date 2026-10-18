@@ -9,7 +9,6 @@ import subprocess
 import sys
 import threading
 import time
-from functools import lru_cache
 
 try:
     import termios
@@ -48,7 +47,6 @@ logger = get_logger(__name__)
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 BEST_SCORE_PATH = os.path.join(APP_DIR, ".aura_pose_best_score.json")
-STAGE_BACKGROUND_PATH = os.path.join(os.path.dirname(APP_DIR), "pantano.png")
 
 
 def _load_best_score():
@@ -129,6 +127,8 @@ DIFFICULTY_CONFIG = {
     "hard": {"min_movement": 0.06, "full_movement": 0.75},
 }
 SCORE_SMOOTHING_SECONDS = 0.75
+LANDMARK_SMOOTHING_SECONDS = 0.12
+NOISE_CALIBRATION_SECONDS = 3.0
 MISSING_POSE_DECAY_SECONDS = 1.25
 
 
@@ -143,6 +143,9 @@ class AuraGameCallback(app_callback_class):
         self.last_pose = None
         self.last_pose_norm = None
         self.last_update = time.monotonic()
+        self.movement_noise_floor = 0.0
+        self.activity_breakdown = {"left_arm": 0.0, "right_arm": 0.0, "torso": 0.0}
+        self.tracking_confidence = 0.0
         self.difficulty = "medium"
         self.status_message = "Dance to build aura"
         self.game_state = "playing"
@@ -165,6 +168,9 @@ class AuraGameCallback(app_callback_class):
         self.last_pose = None
         self.last_pose_norm = None
         self.last_update = time.monotonic()
+        self.movement_noise_floor = 0.0
+        self.activity_breakdown = {"left_arm": 0.0, "right_arm": 0.0, "torso": 0.0}
+        self.tracking_confidence = 0.0
         logger.info("Restarted aura pose game")
 
     def trigger_game_over(self, reason="Session ended"):
@@ -206,19 +212,33 @@ def _pixel_point(point, bbox, width, height):
     )
 
 
-def _dance_motion_score(prev_points, points, bbox, frame_delta, difficulty):
-    """Score movement intensity and how many body regions are moving."""
+def _smooth_pose_points(prev_points, points, frame_delta):
+    """Low-pass filter landmarks to reduce frame-to-frame detector jitter."""
     if prev_points is None or frame_delta <= 0.0:
-        return 0.0
+        return points
+    alpha = 1.0 - math.exp(-frame_delta / LANDMARK_SMOOTHING_SECONDS)
+    return [
+        (
+            previous[0] + alpha * (current[0] - previous[0]),
+            previous[1] + alpha * (current[1] - previous[1]),
+        )
+        for previous, current in zip(prev_points, points)
+    ]
+
+
+def _dance_motion_score(prev_points, points, bbox, frame_delta, difficulty, noise_floor):
+    """Score normalized movement and return per-region activity and noise."""
+    if prev_points is None or frame_delta <= 0.0:
+        return 0.0, {"left_arm": 0.0, "right_arm": 0.0, "torso": 0.0}, noise_floor
 
     regions = (
-        (LEFT_SHOULDER, LEFT_ELBOW, LEFT_WRIST),
-        (RIGHT_SHOULDER, RIGHT_ELBOW, RIGHT_WRIST),
-        (LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_HIP, RIGHT_HIP),
+        ("left_arm", (LEFT_SHOULDER, LEFT_ELBOW, LEFT_WRIST)),
+        ("right_arm", (RIGHT_SHOULDER, RIGHT_ELBOW, RIGHT_WRIST)),
+        ("torso", (LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_HIP, RIGHT_HIP)),
     )
     body_scale = max((bbox.width() + bbox.height()) / 2.0, 1e-6)
-    region_speeds = []
-    for region in regions:
+    raw_speeds = {}
+    for name, region in regions:
         motion = sum(
             math.hypot(
                 points[index][0] - prev_points[index][0],
@@ -226,19 +246,38 @@ def _dance_motion_score(prev_points, points, bbox, frame_delta, difficulty):
             )
             for index in region
         ) / len(region)
-        region_speeds.append(motion / body_scale / frame_delta)
+        raw_speeds[name] = motion / body_scale / frame_delta
 
     config = DIFFICULTY_CONFIG[difficulty]
-    movement = sum(region_speeds) / len(region_speeds)
+    movement = sum(raw_speeds.values()) / len(raw_speeds)
+    if movement < config["min_movement"] * 1.5:
+        noise_alpha = 1.0 - math.exp(-frame_delta / NOISE_CALIBRATION_SECONDS)
+        noise_floor += noise_alpha * (movement - noise_floor)
+
+    movement_threshold = max(config["min_movement"], noise_floor * 2.5)
+    full_movement = max(config["full_movement"], movement_threshold + config["min_movement"])
+    dead_zone = noise_floor * 2.0
+    region_speeds = {
+        name: max(0.0, speed - dead_zone)
+        for name, speed in raw_speeds.items()
+    }
+    movement = sum(region_speeds.values()) / len(region_speeds)
     activity_score = 100.0 * np.clip(
-        (movement - config["min_movement"])
-        / (config["full_movement"] - config["min_movement"]),
+        (movement - movement_threshold) / (full_movement - movement_threshold),
         0.0,
         1.0,
     )
-    active_regions = sum(speed >= config["min_movement"] for speed in region_speeds)
+    active_regions = sum(speed >= movement_threshold for speed in region_speeds.values())
     variety_factor = 0.7 + 0.3 * active_regions / len(regions)
-    return float(activity_score * variety_factor)
+    region_scores = {
+        name: float(100.0 * np.clip(
+            (speed - movement_threshold) / (full_movement - movement_threshold),
+            0.0,
+            1.0,
+        ))
+        for name, speed in region_speeds.items()
+    }
+    return float(activity_score * variety_factor), region_scores, noise_floor
 
 
 def _pose_confidence(detection, points, bbox):
@@ -253,22 +292,6 @@ def _pose_confidence(detection, points, bbox):
     return float(np.clip(0.7 * det_conf + 0.3 * visibility, 0.0, 1.0))
 
 
-@lru_cache(maxsize=1)
-def _load_stage_background():
-    stage = cv2.imread(STAGE_BACKGROUND_PATH, cv2.IMREAD_COLOR)
-    if stage is None:
-        raise FileNotFoundError(f"Could not load stage background: {STAGE_BACKGROUND_PATH}")
-    return stage
-
-
-@lru_cache(maxsize=2)
-def _draw_stage_background(width, height):
-    """Scale the supplied stage background for the current frame size."""
-    stage = cv2.resize(_load_stage_background(), (width, height), interpolation=cv2.INTER_LINEAR)
-    stage.setflags(write=False)
-    return stage
-
-
 def _aura_colour(score):
     """Map a score to a warm-to-cool aura colour."""
     hue = int(135 - (min(score, 100.0) / 100.0) * 135)
@@ -276,10 +299,11 @@ def _aura_colour(score):
     return tuple(int(value) for value in cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)[0, 0])
 
 
-def _draw_hud(image, score, best_score, width, height, status_message, difficulty):
+def _draw_hud(image, score, best_score, width, height, status_message, difficulty,
+              activity_breakdown, tracking_confidence):
     colour = _aura_colour(score)
-    cv2.rectangle(image, (20, 20), (390, 210), (18, 22, 42), -1)
-    cv2.rectangle(image, (20, 20), (390, 210), colour, 2)
+    cv2.rectangle(image, (20, 20), (390, 270), (18, 22, 42), -1)
+    cv2.rectangle(image, (20, 20), (390, 270), colour, 2)
     cv2.putText(image, "AURA METER", (42, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.8, colour, 2)
     cv2.putText(image, f"{score:05.1f} / 100", (42, 105),
                 cv2.FONT_HERSHEY_SIMPLEX, 1.15, (255, 255, 255), 2)
@@ -287,12 +311,24 @@ def _draw_hud(image, score, best_score, width, height, status_message, difficult
     cv2.rectangle(image, (42, 122), (42 + int(323 * score / 100), 143), colour, -1)
     cv2.putText(image, f"BEST {best_score:05.1f}", (42, 168),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 230), 1)
+    for index, (name, label) in enumerate(
+        (("left_arm", "L ARM"), ("right_arm", "R ARM"), ("torso", "TORSO"))
+    ):
+        y = 193 + index * 23
+        region_score = activity_breakdown[name]
+        cv2.putText(image, f"{label} {region_score:3.0f}", (42, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (220, 220, 230), 1)
+        cv2.rectangle(image, (145, y - 11), (365, y - 3), (65, 65, 85), -1)
+        cv2.rectangle(image, (145, y - 11), (145 + int(220 * region_score / 100), y - 3),
+                      colour, -1)
     label = "MAXIMUM AURA" if score >= 85 else "STRONG AURA" if score >= 65 else "BUILD AURA"
     cv2.putText(image, "DANCE AURA", (width - 260, 48),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, colour, 2)
     cv2.putText(image, label, (width - 220, 82),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (245, 245, 250), 2)
     cv2.putText(image, difficulty.upper(), (width - 200, 108),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 210, 255), 1)
+    cv2.putText(image, f"TRACK {tracking_confidence * 100:02.0f}%", (width - 200, 130),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 210, 255), 1)
     cv2.putText(image, status_message, (width - 290, 145),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1)
@@ -339,24 +375,33 @@ def app_callback(element, buffer, user_data):
         landmark_sets = detection.get_objects_typed(hailo.HAILO_LANDMARKS)
         if landmark_sets and len(landmark_sets[0].get_points()) > RIGHT_HIP:
             bbox = detection.get_bbox()
-            normalized_points = [
+            raw_points = [
                 _normalized_point(point, bbox)
                 for point in landmark_sets[0].get_points()
             ]
+            normalized_points = _smooth_pose_points(
+                user_data.last_pose_norm,
+                raw_points,
+                frame_delta,
+            )
             points = [
                 _pixel_point(point, bbox, width, height)
                 for point in landmark_sets[0].get_points()
             ]
             if user_data.game_state == "playing":
-                dance_score = _dance_motion_score(
+                dance_score, activity_breakdown, user_data.movement_noise_floor = _dance_motion_score(
                     user_data.last_pose_norm,
                     normalized_points,
                     bbox,
                     frame_delta,
                     user_data.difficulty,
+                    user_data.movement_noise_floor,
                 )
                 confidence = _pose_confidence(detection, normalized_points, bbox)
-                dynamic_score = confidence * dance_score
+                user_data.activity_breakdown = activity_breakdown
+                user_data.tracking_confidence = confidence
+                confidence_factor = float(np.clip(confidence / 0.5, 0.0, 1.0))
+                dynamic_score = confidence_factor * dance_score
                 smoothing = 1.0 - math.exp(-frame_delta / SCORE_SMOOTHING_SECONDS)
                 user_data.aura_score = (1.0 - smoothing) * user_data.aura_score + smoothing * dynamic_score
                 user_data.status_message = "Keep dancing!" if dance_score >= 35.0 else "Move to build aura"
@@ -369,12 +414,13 @@ def app_callback(element, buffer, user_data):
     else:
         user_data.last_pose = None
         user_data.last_pose_norm = None
+        user_data.activity_breakdown = {"left_arm": 0.0, "right_arm": 0.0, "torso": 0.0}
+        user_data.tracking_confidence = 0.0
         if user_data.game_state == "playing":
             user_data.aura_score *= math.exp(-frame_delta / MISSING_POSE_DECAY_SECONDS)
             user_data.status_message = "Pose not detected"
 
     output = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-    output = cv2.addWeighted(_draw_stage_background(width, height), 0.55, output, 0.45, 0)
 
     if user_data.game_state == "playing" and user_data.last_pose is not None:
         colour = _aura_colour(user_data.aura_score)
@@ -393,6 +439,8 @@ def app_callback(element, buffer, user_data):
             height,
             user_data.status_message,
             user_data.difficulty,
+            user_data.activity_breakdown,
+            user_data.tracking_confidence,
         )
     else:
         output = _draw_game_over_screen(
@@ -507,7 +555,12 @@ def main():
         app.stop()
 
     signal.signal(signal.SIGINT, handle_sigint)
-    app.run()
+    try:
+        app.run()
+    finally:
+        keyboard.running = False
+        keyboard.join(timeout=1.0)
+        _save_best_score(user_data.best_score)
 
 
 if __name__ == "__main__":

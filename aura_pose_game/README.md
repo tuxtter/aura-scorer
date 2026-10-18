@@ -5,18 +5,20 @@
 Aura Pose Game uses a pose-estimation pipeline to track a dancer and turn
 movement into a live score from 0 to 100. It keeps the camera feed visible and
 overlays the detected skeleton and aura meter. There are no named target poses.
-The stage background is loaded from `pantano.png` in the repository root.
 
 The score rewards movement intensity and involving multiple body regions
 (left arm, right arm, and torso). It is smoothed over time, so sustained,
 varied dancing builds aura while standing still lets the score fade. Detection
 confidence and landmark visibility also affect the score. Difficulty changes
-how much movement is needed to reach a high score.
+how much movement is needed to reach a high score. The HUD shows per-region
+activity and tracking confidence. Landmark smoothing and a short adaptive
+noise calibration reduce score changes caused by tracking jitter; movement is
+normalized to the detected person size.
 
 The game is one continuous session with no countdowns or time limits. Losing
 pose detection does not end the session; the score fades until movement is
 detected again. The best score is retained while the app runs and saved for
-future launches.
+future launches, including on normal application shutdown.
 
 ## Requirements
 
