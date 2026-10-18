@@ -15,6 +15,10 @@ The score combines:
 Scores are smoothed to avoid flickering and the best score is retained while
 the app runs.
 
+The game is one continuous session with no countdowns or round time limits.
+Match each target pose to advance through the challenges and build a combo;
+the challenges continue cycling until you quit or pose detection is lost.
+
 ## Requirements
 
 Use a Hailo device with the pose-estimation model resources installed and a
@@ -33,3 +37,7 @@ The standard pipeline options are also available, including `--input`,
 
 Stand in view of the camera, spread your arms, and hold a balanced pose. The
 meter changes from "BUILD AURA" to "STRONG AURA" and finally "MAXIMUM AURA".
+
+- `D`: cycle difficulty
+- `R`: restart the session
+- `Q`: end the session

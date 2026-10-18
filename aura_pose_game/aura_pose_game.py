@@ -128,9 +128,9 @@ CHALLENGE_TARGETS = (
     {"name": "BALANCE", "arm_span": 0.60, "shoulder_width": 0.22, "shoulder_to_hip": 0.40, "balance": 0.05},
 )
 DIFFICULTY_CONFIG = {
-    "easy": {"threshold": 70.0, "round_duration": 35.0, "hold_time": 2.2},
-    "medium": {"threshold": 78.0, "round_duration": 30.0, "hold_time": 1.8},
-    "hard": {"threshold": 84.0, "round_duration": 25.0, "hold_time": 1.5},
+    "easy": {"threshold": 70.0},
+    "medium": {"threshold": 78.0},
+    "hard": {"threshold": 84.0},
 }
 
 
@@ -148,17 +148,11 @@ class AuraGameCallback(app_callback_class):
         self.difficulty = "medium"
         self.combo = 0
         self.challenge_index = 0
-        self.pose_hold_time = 0.0
-        self.round_time = 0.0
-        self.round_state = "countdown"
-        self.countdown = 3.0
-        self.status_message = "Get ready"
-        self.match_score = 0.0
+        self.challenge_armed = True
+        self.status_message = "Challenge live"
         self.challenge_name = CHALLENGE_TARGETS[0]["name"]
         self.level = DIFFICULTY_CONFIG[self.difficulty]
-        self.game_state = "start"
-        self.start_countdown = 2.5
-        self.total_rounds_completed = 0
+        self.game_state = "playing"
         self.no_person_time = 0.0
         self.final_score = 0.0
 
@@ -172,21 +166,15 @@ class AuraGameCallback(app_callback_class):
         logger.info("Switched aura difficulty to %s", self.difficulty)
 
     def restart_game(self):
-        """Reset the gameplay loop and return to the start screen."""
+        """Reset the continuous session."""
         self.aura_score = 0.0
         self.combo = 0
         self.challenge_index = 0
-        self.pose_hold_time = 0.0
-        self.round_time = 0.0
-        self.round_state = "countdown"
-        self.countdown = 3.0
-        self.status_message = "Get ready"
-        self.match_score = 0.0
+        self.challenge_armed = True
+        self.status_message = "Challenge live"
         self.challenge_name = CHALLENGE_TARGETS[0]["name"]
         self.level = DIFFICULTY_CONFIG[self.difficulty]
-        self.game_state = "start"
-        self.start_countdown = 2.5
-        self.total_rounds_completed = 0
+        self.game_state = "playing"
         self.no_person_time = 0.0
         self.final_score = 0.0
         self.last_pose = None
@@ -194,18 +182,8 @@ class AuraGameCallback(app_callback_class):
         self.last_update = time.monotonic()
         logger.info("Restarted aura pose game")
 
-    def begin_round(self):
-        """Reset the timer and challenge state for a new round."""
-        self.round_state = "countdown"
-        self.countdown = 3.0
-        self.round_time = 0.0
-        self.pose_hold_time = 0.0
-        self.status_message = "Get ready"
-        self.challenge_name = CHALLENGE_TARGETS[self.challenge_index % len(CHALLENGE_TARGETS)]["name"]
-        self.level = DIFFICULTY_CONFIG[self.difficulty]
-
     def trigger_game_over(self, reason="Stage failed"):
-        """Freeze the game and show the final overlay."""
+        """End the session and show its final score."""
         self.game_state = "game_over"
         self.final_score = self.aura_score
         self.best_score = max(self.best_score, self.final_score)
@@ -213,21 +191,13 @@ class AuraGameCallback(app_callback_class):
         self.status_message = reason
         _play_sound("game_over")
 
-    def advance_round(self):
+    def advance_challenge(self):
         """Move to the next challenge and keep the combo alive."""
         self.challenge_index = (self.challenge_index + 1) % len(CHALLENGE_TARGETS)
         self.combo += 1
-        self.total_rounds_completed += 1
         self.best_score = max(self.best_score, self.aura_score)
-        if self.total_rounds_completed >= 5:
-            self.game_state = "game_over"
-            self.final_score = self.aura_score
-            self.best_score = max(self.best_score, self.final_score)
-            _save_best_score_async(self.best_score)
-            self.status_message = "Stage cleared!"
-            _play_sound("success")
-            return
-        self.begin_round()
+        self.challenge_name = CHALLENGE_TARGETS[self.challenge_index]["name"]
+        self.challenge_armed = False
         self.status_message = f"{self.challenge_name} ready"
         _play_sound("success")
 
@@ -422,7 +392,7 @@ def _draw_target_pose(image, challenge_name, width, height):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
 
 
-def _draw_hud(image, score, best_score, width, height, challenge_name, combo, status_message, timer, difficulty):
+def _draw_hud(image, score, best_score, width, height, challenge_name, combo, status_message, difficulty):
     colour = _aura_colour(score)
     cv2.rectangle(image, (20, 20), (390, 210), (18, 22, 42), -1)
     cv2.rectangle(image, (20, 20), (390, 210), colour, 2)
@@ -445,34 +415,20 @@ def _draw_hud(image, score, best_score, width, height, challenge_name, combo, st
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 210, 255), 1)
     cv2.putText(image, status_message, (width - 290, 120),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1)
-    cv2.putText(image, f"{timer:04.1f}s", (width - 100, 160),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, colour, 2)
     cv2.putText(image, "Spread out and balance your pose!", (width - 390, height - 25),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (235, 235, 235), 1)
 
 
-def _draw_start_screen(image, width, height, difficulty, countdown, best_score):
-    """Render the intro screen before the round starts."""
-    overlay = image.copy()
-    cv2.rectangle(overlay, (60, 60), (width - 60, height - 60), (16, 19, 32), -1)
-    cv2.rectangle(overlay, (60, 60), (width - 60, height - 60), (255, 180, 90), 2)
-    cv2.putText(overlay, "AURA POSE STAGE", (100, 150), cv2.FONT_HERSHEY_SIMPLEX, 1.3, (255, 255, 255), 2)
-    cv2.putText(overlay, f"DIFFICULTY: {difficulty.upper()}", (100, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 220, 140), 2)
-    cv2.putText(overlay, "Match the target pose to build your aura.", (100, 285), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
-    cv2.putText(overlay, f"BEST SCORE: {best_score:05.1f}", (100, 330), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 220), 1)
-    cv2.putText(overlay, f"STARTING IN {max(0.0, countdown):02.1f}s", (100, 390), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (110, 200, 255), 2)
-    return overlay
-
-
-def _draw_game_over_screen(image, width, height, score, best_score):
-    """Render the final summary when the player clears or fails the stage."""
+def _draw_game_over_screen(image, width, height, score, best_score, reason):
+    """Render the final summary when the session ends."""
     overlay = image.copy()
     cv2.rectangle(overlay, (80, 80), (width - 80, height - 80), (12, 14, 20), -1)
     cv2.rectangle(overlay, (80, 80), (width - 80, height - 80), (255, 120, 120), 2)
-    cv2.putText(overlay, "STAGE COMPLETE", (110, 170), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 2)
+    cv2.putText(overlay, "SESSION ENDED", (110, 170), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 2)
     cv2.putText(overlay, f"FINAL AURA: {score:05.1f}", (110, 235), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 200, 90), 2)
     cv2.putText(overlay, f"BEST SCORE: {best_score:05.1f}", (110, 290), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 220, 255), 2)
-    cv2.putText(overlay, "Reset the app to play again.", (110, 350), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
+    cv2.putText(overlay, reason, (110, 350), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
+    cv2.putText(overlay, "Press R to restart.", (110, 390), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
     return overlay
 
 
@@ -489,37 +445,7 @@ def app_callback(element, buffer, user_data):
 
     now = time.monotonic()
     frame_delta = max(0.0, now - user_data.last_update)
-
-    if user_data.game_state == "start":
-        user_data.start_countdown -= frame_delta
-        if user_data.start_countdown <= 0.0:
-            user_data.game_state = "playing"
-            user_data.begin_round()
-            user_data.status_message = "Challenge live"
-        user_data.last_update = now
-    elif user_data.game_state == "game_over":
-        user_data.last_update = now
-    else:
-        if user_data.round_state == "countdown":
-            user_data.countdown -= frame_delta
-            user_data.status_message = f"{max(1, int(math.ceil(user_data.countdown)))}..."
-            if user_data.countdown <= 0.0:
-                user_data.round_state = "playing"
-                user_data.round_time = 0.0
-                user_data.status_message = "Challenge live"
-        elif user_data.round_state == "playing":
-            user_data.round_time += frame_delta
-            user_data.level = DIFFICULTY_CONFIG[user_data.difficulty]
-            challenge_timeout = user_data.level["round_duration"]
-            if user_data.round_time >= challenge_timeout:
-                user_data.round_state = "finished"
-                user_data.status_message = "Round complete!"
-                user_data.trigger_game_over("Time up")
-            else:
-                user_data.status_message = f"{challenge_timeout - user_data.round_time:04.1f}s left"
-        else:
-            user_data.status_message = "Round complete"
-        user_data.last_update = now
+    user_data.last_update = now
 
     roi = hailo.get_roi_from_buffer(buffer)
     detections = [
@@ -551,14 +477,12 @@ def app_callback(element, buffer, user_data):
                 smoothing = np.clip(0.12 + 0.28 * confidence, 0.12, 0.42)
                 user_data.aura_score = (1.0 - smoothing) * user_data.aura_score + smoothing * dynamic_score
                 if match_score >= user_data.level["threshold"]:
-                    user_data.pose_hold_time += frame_delta
-                    if user_data.pose_hold_time >= user_data.level["hold_time"]:
+                    if user_data.challenge_armed:
                         user_data.status_message = f"Perfect {challenge_target['name']}!"
                         user_data.aura_score = min(100.0, user_data.aura_score + 8.0)
-                        user_data.pose_hold_time = 0.0
-                        user_data.advance_round()
+                        user_data.advance_challenge()
                 else:
-                    user_data.pose_hold_time = 0.0
+                    user_data.challenge_armed = True
 
                 user_data.best_score = max(user_data.best_score, user_data.aura_score)
             pose = points
@@ -597,13 +521,17 @@ def app_callback(element, buffer, user_data):
             user_data.challenge_name,
             user_data.combo,
             user_data.status_message,
-            max(0.0, user_data.level["round_duration"] - user_data.round_time),
             user_data.difficulty,
         )
-    elif user_data.game_state == "start":
-        output = _draw_start_screen(output, width, height, user_data.difficulty, user_data.start_countdown, user_data.best_score)
     else:
-        output = _draw_game_over_screen(output, width, height, user_data.aura_score, user_data.best_score)
+        output = _draw_game_over_screen(
+            output,
+            width,
+            height,
+            user_data.aura_score,
+            user_data.best_score,
+            user_data.status_message,
+        )
 
     user_data.set_frame(output)
     return Gst.FlowReturn.OK
