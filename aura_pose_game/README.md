@@ -2,22 +2,20 @@
 
 ## Description
 
-Aura Pose Game turns a person's pose into a live score from 0 to 100. It is
-based on the pose-estimation pipeline used by `easter_game.py`, but keeps the
-camera feed visible and overlays a pose skeleton and aura meter.
+Aura Pose Game uses a pose-estimation pipeline to track a dancer and turn
+movement into a live score from 0 to 100. It keeps the camera feed visible and
+overlays the detected skeleton and aura meter. There are no named target poses.
 
-The score combines:
+The score rewards movement intensity and involving multiple body regions
+(left arm, right arm, and torso). It is smoothed over time, so sustained,
+varied dancing builds aura while standing still lets the score fade. Detection
+confidence and landmark visibility also affect the score. Difficulty changes
+how much movement is needed to reach a high score.
 
-- Arm span and shoulder width for pose openness
-- Torso openness between the shoulders and hips
-- Left/right balance for symmetry
-
-Scores are smoothed to avoid flickering and the best score is retained while
-the app runs.
-
-The game is one continuous session with no countdowns or round time limits.
-Match each target pose to advance through the challenges and build a combo;
-the challenges continue cycling until you quit or pose detection is lost.
+The game is one continuous session with no countdowns or time limits. Losing
+pose detection does not end the session; the score fades until movement is
+detected again. The best score is retained while the app runs and saved for
+future launches.
 
 ## Requirements
 
@@ -35,8 +33,8 @@ The standard pipeline options are also available, including `--input`,
 
 ## Controls
 
-Stand in view of the camera, spread your arms, and hold a balanced pose. The
-meter changes from "BUILD AURA" to "STRONG AURA" and finally "MAXIMUM AURA".
+Stand in view of the camera and keep dancing to build your aura. The meter
+changes from "BUILD AURA" to "STRONG AURA" and finally "MAXIMUM AURA".
 
 - `D`: cycle difficulty
 - `R`: restart the session
