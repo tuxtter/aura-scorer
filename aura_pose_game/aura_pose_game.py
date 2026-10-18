@@ -704,13 +704,13 @@ def main():
     user_data = AuraGameCallback(mode=args.mode)
     user_data.difficulty = args.difficulty
     app = AuraPoseGame(app_callback, user_data, parser)
-    keyboard = KeyboardController(user_data, app.stop)
+    keyboard = KeyboardController(user_data, app.shutdown)
     keyboard.start()
 
     def handle_sigint(_signal_number, _frame):
         logger.info("Stopping aura pose game")
         keyboard.running = False
-        app.stop()
+        app.shutdown()
 
     signal.signal(signal.SIGINT, handle_sigint)
     try:
