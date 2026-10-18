@@ -20,6 +20,10 @@ pose detection does not end the session; the score fades until movement is
 detected again. The best score is retained while the app runs and saved for
 future launches, including on normal application shutdown.
 
+Run a two-player best-score challenge with `--mode duel`. The two players are
+assigned by screen position (left and right); their best aura scores are
+compared when the match is ended with `Q`.
+
 ## Requirements
 
 Use a Hailo device with the pose-estimation model resources installed and a
@@ -29,6 +33,12 @@ working camera or video source.
 
 ```bash
 python3 aura_pose_game.py --input usb
+```
+
+Start a 1-vs-1 match:
+
+```bash
+python3 aura_pose_game.py --input usb --mode duel
 ```
 
 The standard pipeline options are also available, including `--input`,
@@ -41,4 +51,4 @@ changes from "BUILD AURA" to "STRONG AURA" and finally "MAXIMUM AURA".
 
 - `D`: cycle difficulty
 - `R`: restart the session
-- `Q`: end the session
+- `Q`: end the session (in duel mode, logs the winner or a tie)
