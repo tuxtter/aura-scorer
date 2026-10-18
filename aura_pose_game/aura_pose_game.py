@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+from functools import lru_cache
 
 try:
     import termios
@@ -32,6 +33,13 @@ from hailo_apps.python.core.common.buffer_utils import (
 from hailo_apps.python.core.common.hailo_logger import get_logger
 from hailo_apps.python.core.common.parser import get_pipeline_parser
 from hailo_apps.python.core.gstreamer.gstreamer_app import app_callback_class
+from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
+    INFERENCE_PIPELINE,
+    INFERENCE_PIPELINE_WRAPPER,
+    QUEUE,
+    TRACKER_PIPELINE,
+    USER_CALLBACK_PIPELINE,
+)
 from hailo_apps.python.pipeline_apps.pose_estimation.pose_estimation_pipeline import (
     GStreamerPoseEstimationApp,
 )
@@ -64,17 +72,16 @@ def _save_best_score(score):
         logger.debug("Could not save best score")
 
 
-def _play_sound(sound_name):
+def _play_sound_blocking(sound_name):
     """Play a quick system sound without requiring a library dependency."""
     try:
-        if sound_name == "success":
-            sound_path = "/System/Library/Sounds/Glass.aiff" if sys.platform == "darwin" else None
-        else:
-            sound_path = "/System/Library/Sounds/Pop.aiff" if sys.platform == "darwin" else None
-
-        if sys.platform == "darwin" and sound_path and os.path.exists(sound_path):
-            subprocess.run(["afplay", sound_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-            return
+        if sys.platform == "darwin":
+            sound_file = "Glass.aiff" if sound_name == "success" else "Pop.aiff"
+            sound_path = f"/System/Library/Sounds/{sound_file}"
+            if os.path.exists(sound_path):
+                subprocess.run(["afplay", sound_path], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, check=False)
+                return
 
         if sys.platform == "linux":
             if os.system("printf '\a' >/dev/console 2>/dev/null") == 0:
@@ -87,6 +94,16 @@ def _play_sound(sound_name):
         print("\a", end="", flush=True)
     except Exception:
         logger.debug("Sound playback unavailable on this system")
+
+
+def _play_sound(sound_name):
+    """Play sounds on a daemon thread so the GStreamer callback never blocks."""
+    threading.Thread(target=_play_sound_blocking, args=(sound_name,), daemon=True).start()
+
+
+def _save_best_score_async(score):
+    """Write the best score off the callback thread."""
+    threading.Thread(target=_save_best_score, args=(score,), daemon=True).start()
 
 
 LEFT_SHOULDER, RIGHT_SHOULDER = 5, 6
@@ -192,7 +209,7 @@ class AuraGameCallback(app_callback_class):
         self.game_state = "game_over"
         self.final_score = self.aura_score
         self.best_score = max(self.best_score, self.final_score)
-        _save_best_score(self.best_score)
+        _save_best_score_async(self.best_score)
         self.status_message = reason
         _play_sound("game_over")
 
@@ -206,7 +223,7 @@ class AuraGameCallback(app_callback_class):
             self.game_state = "game_over"
             self.final_score = self.aura_score
             self.best_score = max(self.best_score, self.final_score)
-            _save_best_score(self.best_score)
+            _save_best_score_async(self.best_score)
             self.status_message = "Stage cleared!"
             _play_sound("success")
             return
@@ -273,9 +290,9 @@ def _pose_metrics(points, bbox):
     }
 
 
-def _score_pose(points, bbox):
+def _score_pose(points, bbox, metrics=None):
     """Return a 0-100 score from openness, arm span, and symmetry."""
-    metrics = _pose_metrics(points, bbox)
+    metrics = metrics or _pose_metrics(points, bbox)
     openness = 100.0 * (
         0.45 * np.clip((metrics["arm_span"] - 0.25) / 0.85, 0.0, 1.0)
         + 0.30 * np.clip((metrics["shoulder_width"] - 0.12) / 0.35, 0.0, 1.0)
@@ -289,9 +306,9 @@ def _score_pose(points, bbox):
     return float(np.clip(0.7 * openness + 0.3 * symmetry, 0.0, 100.0))
 
 
-def _target_match_score(points, bbox, target):
+def _target_match_score(points, bbox, target, metrics=None):
     """Compare the current pose against a target challenge pose."""
-    metrics = _pose_metrics(points, bbox)
+    metrics = metrics or _pose_metrics(points, bbox)
     arm_score = 100.0 * np.clip(1.0 - abs(metrics["arm_span"] - target["arm_span"]) / 0.55, 0.0, 1.0)
     shoulder_score = 100.0 * np.clip(
         1.0 - abs(metrics["shoulder_width"] - target["shoulder_width"]) / 0.32, 0.0, 1.0
@@ -338,16 +355,18 @@ def _pose_confidence(detection, points, bbox, prev_points=None):
     return float(np.clip(0.5 * det_conf + 0.3 * visibility + 0.2 * stability, 0.0, 1.0))
 
 
+@lru_cache(maxsize=2)
 def _draw_stage_background(width, height):
-    """Create a stylized stage backdrop behind the live pose output."""
+    """Create (once per resolution) a stylized stage backdrop behind the live pose output."""
     stage = np.full((height, width, 3), (18, 22, 42), dtype=np.uint8)
     center_x = width // 2
     center_y = int(height * 0.32)
 
-    for x in range(width):
-        glow = int((x / max(width - 1, 1)) * 55)
-        stage[:, x, 0] = np.clip(stage[:, x, 0] + glow, 0, 255)
-        stage[:, x, 2] = np.clip(stage[:, x, 2] + int((1.0 - x / max(width, 1)) * 18), 0, 255)
+    xs = np.arange(width, dtype=np.float32) / max(width - 1, 1)
+    stage[:, :, 0] = np.clip(18 + (xs * 55).astype(np.int32), 0, 255).astype(np.uint8)[None, :]
+    stage[:, :, 2] = np.clip(
+        42 + ((1.0 - np.arange(width, dtype=np.float32) / max(width, 1)) * 18).astype(np.int32), 0, 255
+    ).astype(np.uint8)[None, :]
 
     cv2.ellipse(stage, (center_x, center_y), (int(width * 0.28), int(height * 0.19)), 0, 0, 360,
                 (72, 82, 140), 2)
@@ -362,6 +381,7 @@ def _draw_stage_background(width, height):
         radius = int(width * (0.14 + ring * 0.10))
         cv2.circle(stage, (center_x, center_y), radius, (80 + ring * 25, 80 + ring * 15, 110), 1)
 
+    stage.setflags(write=False)
     return stage
 
 
@@ -521,11 +541,12 @@ def app_callback(element, buffer, user_data):
                 for point in landmark_sets[0].get_points()
             ]
             if user_data.game_state == "playing":
-                pose_score = _score_pose(normalized_points, bbox)
+                metrics = _pose_metrics(normalized_points, bbox)
+                pose_score = _score_pose(normalized_points, bbox, metrics)
                 motion_score = _pose_motion(user_data.last_pose_norm, normalized_points, bbox)
                 confidence = _pose_confidence(detection, normalized_points, bbox, user_data.last_pose_norm)
                 challenge_target = CHALLENGE_TARGETS[user_data.challenge_index]
-                match_score = _target_match_score(normalized_points, bbox, challenge_target)
+                match_score = _target_match_score(normalized_points, bbox, challenge_target, metrics)
                 dynamic_score = confidence * (0.45 * pose_score + 0.25 * motion_score + 0.30 * match_score)
                 smoothing = np.clip(0.12 + 0.28 * confidence, 0.12, 0.42)
                 user_data.aura_score = (1.0 - smoothing) * user_data.aura_score + smoothing * dynamic_score
@@ -555,8 +576,7 @@ def app_callback(element, buffer, user_data):
         user_data.no_person_time = 0.0
 
     output = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-    stage_background = _draw_stage_background(width, height)
-    output = cv2.addWeighted(stage_background, 0.55, output, 0.45, 0)
+    output = cv2.addWeighted(_draw_stage_background(width, height), 0.55, output, 0.45, 0)
 
     if user_data.game_state == "playing" and user_data.last_pose is not None:
         colour = _aura_colour(user_data.aura_score)
@@ -596,6 +616,27 @@ class AuraPoseGame(GStreamerPoseEstimationApp):
         super().__init__(app_callback, user_data, parser)
         self.options_menu.use_frame = True
         user_data.use_frame = True
+
+    def get_pipeline_string(self):
+        """Pose pipeline without the GStreamer display branch.
+
+        The game renders its own frames in a separate OpenCV process, so the
+        overlay/videoconvert/video sink would only duplicate work.
+        """
+        infer_pipeline = INFERENCE_PIPELINE(
+            hef_path=self.hef_path,
+            post_process_so=self.post_process_so,
+            post_function_name=self.post_process_function,
+            batch_size=self.batch_size,
+        )
+        return (
+            f"{self.get_source_pipeline()} ! "
+            f"{INFERENCE_PIPELINE_WRAPPER(infer_pipeline)} ! "
+            f"{TRACKER_PIPELINE(class_id=0)} ! "
+            f"{USER_CALLBACK_PIPELINE()} ! "
+            f"{QUEUE(name='aura_sink_q', max_size_buffers=1, leaky='downstream')} ! "
+            "fakesink name=hailo_display sync=false async=false"
+        )
 
 
 class KeyboardController(threading.Thread):
@@ -653,6 +694,8 @@ def main():
         default="medium",
         help="Set the aura challenge difficulty.",
     )
+    # 640x480 keeps per-frame CPU work low enough for Raspberry Pi 5 + Hailo-8L.
+    parser.set_defaults(width=640, height=480)
     args = parser.parse_args()
 
     user_data = AuraGameCallback()
