@@ -622,8 +622,6 @@ def main():
         default="medium",
         help="Set the aura challenge difficulty.",
     )
-    # 640x480 keeps per-frame CPU work low enough for Raspberry Pi 5 + Hailo-8L.
-    parser.set_defaults(width=640, height=480)
     args = parser.parse_args()
 
     user_data = AuraGameCallback()
