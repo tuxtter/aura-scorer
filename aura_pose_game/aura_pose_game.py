@@ -172,6 +172,7 @@ class AuraGameCallback(app_callback_class):
         self.status_message = "Dance to build aura"
         self.game_state = "playing"
         self.final_score = 0.0
+        self.final_duel_result = None
         self.duel_players = [DuelPlayerState("PLAYER 1"), DuelPlayerState("PLAYER 2")]
 
     def cycle_difficulty(self):
@@ -182,12 +183,23 @@ class AuraGameCallback(app_callback_class):
         self.status_message = f"Difficulty: {self.difficulty.upper()}"
         logger.info("Switched aura difficulty to %s", self.difficulty)
 
+    def toggle_mode(self, player_names=None):
+        """Switch between solo and duel, starting a fresh run in the new mode."""
+        self.mode = "duel" if self.mode == "solo" else "solo"
+        if player_names is not None:
+            for player, name in zip(self.duel_players, player_names):
+                player.name = name
+        self.restart_game()
+        self.status_message = f"Mode: {self.mode.upper()}"
+        logger.info("Switched aura game mode to %s", self.mode)
+
     def restart_game(self):
         """Reset the continuous session."""
         self.aura_score = 0.0
         self.status_message = "Dance to build aura"
         self.game_state = "playing"
         self.final_score = 0.0
+        self.final_duel_result = None
         self.last_pose = None
         self.last_pose_norm = None
         self.last_update = time.monotonic()
@@ -204,19 +216,31 @@ class AuraGameCallback(app_callback_class):
         if abs(player_one.best_score - player_two.best_score) < 0.1:
             logger.info("1-vs-1 duel ended in a tie: both players scored %.1f",
                         player_one.best_score)
+            return (
+                "TIE GAME",
+                f"{player_one.name}: {player_one.best_score:.1f}  "
+                f"{player_two.name}: {player_two.best_score:.1f}",
+            )
         else:
             winner = player_one if player_one.best_score > player_two.best_score else player_two
+            opponent = player_two if winner is player_one else player_one
             logger.info(
                 "1-vs-1 duel winner: %s with %.1f (opponent: %.1f)",
                 winner.name,
                 winner.best_score,
-                player_two.best_score if winner is player_one else player_one.best_score,
+                opponent.best_score,
+            )
+            return (
+                f"{winner.name} WINS!",
+                f"ACHIEVED AURA: {winner.best_score:.1f}",
             )
 
     def trigger_game_over(self, reason="Session ended"):
         """End the session and show its final score."""
         self.game_state = "game_over"
         self.final_score = self.aura_score
+        if self.mode == "duel":
+            self.final_duel_result = self.log_duel_winner()
         self.best_score = max(self.best_score, self.final_score)
         _save_best_score_async(self.best_score)
         self.status_message = reason
@@ -499,6 +523,8 @@ def _draw_hud(image, score, best_score, width, height, status_message, difficult
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 210, 255), 1)
     cv2.putText(image, status_message, (width - 290, 145),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1)
+    cv2.putText(image, "M: switch to DUEL", (width - 210, 170),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 230), 1)
     cv2.putText(image, "Keep moving to build your aura!", (width - 390, height - 25),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (235, 235, 235), 1)
 
@@ -527,19 +553,50 @@ def _draw_duel_hud(image, players, width, height):
         cv2.rectangle(image, (bar_x, bar_y), (bar_x + fill, bar_y + 6), colour, -1)
     cv2.putText(image, "Q: end", (width - 60, height - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, (240, 240, 240), 1)
+    cv2.putText(image, "M: switch to SOLO", (margin, height - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (240, 240, 240), 1)
 
 
-def _draw_game_over_screen(image, width, height, score, best_score, reason):
+def _draw_game_over_screen(image, width, height, score, best_score, reason,
+                           duel_result=None):
     """Render the final summary when the session ends."""
     overlay = image.copy()
     cv2.rectangle(overlay, (80, 80), (width - 80, height - 80), (12, 14, 20), -1)
     cv2.rectangle(overlay, (80, 80), (width - 80, height - 80), (255, 120, 120), 2)
     cv2.putText(overlay, "SESSION ENDED", (110, 170), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 2)
-    cv2.putText(overlay, f"FINAL AURA: {score:05.1f}", (110, 235), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 200, 90), 2)
-    cv2.putText(overlay, f"BEST SCORE: {best_score:05.1f}", (110, 290), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 220, 255), 2)
+    if duel_result:
+        cv2.putText(overlay, duel_result[0], (110, 235),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 200, 90), 2)
+        cv2.putText(overlay, duel_result[1], (110, 290),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 220, 255), 2)
+    else:
+        cv2.putText(overlay, f"FINAL AURA: {score:05.1f}", (110, 235),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 200, 90), 2)
+        cv2.putText(overlay, f"BEST SCORE: {best_score:05.1f}", (110, 290),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 220, 255), 2)
     cv2.putText(overlay, reason, (110, 350), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
     cv2.putText(overlay, "Press R to restart.", (110, 390), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
     return overlay
+
+
+def _prompt_player_names():
+    """Read duel player names, using the standard labels for blank entries."""
+    names = []
+    for default_name in ("PLAYER 1", "PLAYER 2"):
+        while True:
+            try:
+                name = input(f"{default_name} name (max 20 characters): ").strip()
+            except EOFError:
+                logger.warning("Could not read player names; using default names")
+                return ["PLAYER 1", "PLAYER 2"]
+            if not name:
+                names.append(default_name)
+                break
+            if len(name) <= 20:
+                names.append(name)
+                break
+            print("Names must be 20 characters or fewer.")
+    return names
 
 
 def app_callback(element, buffer, user_data):
@@ -624,9 +681,10 @@ def app_callback(element, buffer, user_data):
             output,
             width,
             height,
-            user_data.aura_score,
+            user_data.final_score,
             user_data.best_score,
             user_data.status_message,
+            user_data.final_duel_result,
         )
 
     user_data.set_frame(output)
@@ -671,18 +729,39 @@ class KeyboardController(threading.Thread):
         self.user_data = user_data
         self.stop_app = stop_app
         self.running = True
+        self.terminal_fd = None
+        self.original_terminal_settings = None
+
+    def _prompt_duel_names(self):
+        if self.original_terminal_settings is None:
+            return _prompt_player_names()
+        termios.tcsetattr(
+            self.terminal_fd, termios.TCSADRAIN, self.original_terminal_settings
+        )
+        try:
+            return _prompt_player_names()
+        finally:
+            if self.running:
+                tty.setcbreak(self.terminal_fd)
 
     def _handle_key(self, key):
         if key in ("d", "D"):
             self.user_data.cycle_difficulty()
+        elif key in ("m", "M"):
+            player_names = (
+                self._prompt_duel_names()
+                if self.user_data.mode == "solo"
+                else None
+            )
+            self.user_data.toggle_mode(player_names)
         elif key in ("r", "R"):
             self.user_data.restart_game()
         elif key in ("q", "Q"):
-            if self.user_data.mode == "duel":
-                self.user_data.log_duel_winner()
-            self.user_data.trigger_game_over("Quit requested")
-            self.running = False
-            self.stop_app()
+            if self.user_data.game_state == "playing":
+                self.user_data.trigger_game_over("Session ended")
+            else:
+                self.running = False
+                self.stop_app()
 
     def run(self):
         if hasattr(sys.stdin, "isatty") and not sys.stdin.isatty():
@@ -703,6 +782,8 @@ class KeyboardController(threading.Thread):
 
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
+        self.terminal_fd = fd
+        self.original_terminal_settings = old_settings
         try:
             tty.setcbreak(fd)
             while self.running:
@@ -733,6 +814,9 @@ def main():
     args = parser.parse_args()
 
     user_data = AuraGameCallback(mode=args.mode)
+    if args.mode == "duel" and sys.stdin.isatty():
+        for player, name in zip(user_data.duel_players, _prompt_player_names()):
+            player.name = name
     user_data.difficulty = args.difficulty
     app = AuraPoseGame(app_callback, user_data, parser)
     keyboard = KeyboardController(user_data, app.shutdown)

@@ -24,7 +24,9 @@ future launches, including on normal application shutdown.
 
 Run a two-player best-score challenge with `--mode duel`. The two players are
 assigned by screen position (left and right); their best aura scores are
-compared when the match is ended with `Q`.
+compared when the match is ended with `Q`. Enter player names when starting in
+duel mode or switching to duel with `M`; leave a name blank to use its default.
+The end screen shows the winner and their best score, or both scores in a tie.
 
 ## Requirements
 
@@ -52,5 +54,6 @@ Stand in view of the camera and keep dancing to build your aura. The meter
 changes from "BUILD AURA" to "STRONG AURA" and finally "MAXIMUM AURA".
 
 - `D`: cycle difficulty
+- `M`: switch between solo and duel mode (starts a fresh run)
 - `R`: restart the session
-- `Q`: end the session (in duel mode, logs the winner or a tie)
+- `Q`: end the session and show the result; press `Q` again to exit
