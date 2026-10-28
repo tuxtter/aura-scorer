@@ -17,14 +17,16 @@ activity and tracking confidence. Landmark smoothing and a short adaptive
 noise calibration reduce score changes caused by tracking jitter; movement is
 normalized to the detected person size.
 
-The game is one continuous session with no countdowns or time limits. Losing
+Solo mode is one continuous session with no countdowns or time limits. Losing
 pose detection does not end the session; the score fades until movement is
 detected again. The best score is retained while the app runs and saved for
 future launches, including on normal application shutdown.
 
 Run a two-player best-score challenge with `--mode duel`. The two players are
 assigned by screen position (left and right); their best aura scores are
-compared when the match is ended with `Q`. Enter player names when starting in
+compared when the 90-second match timer reaches zero (or earlier if ended with
+`Q`). The countdown is shown at the top of the screen and turns red for the
+last 10 seconds. Enter player names when starting in
 duel mode or switching to duel with `M`; leave a name blank to use its default.
 The end screen shows the winner and their best score, or both scores in a tie.
 
@@ -55,5 +57,5 @@ changes from "BUILD AURA" to "STRONG AURA" and finally "MAXIMUM AURA".
 
 - `D`: cycle difficulty
 - `M`: switch between solo and duel mode (starts a fresh run)
-- `R`: restart the session
+- `R`: restart the session (resets the 90-second duel timer)
 - `Q`: end the session and show the result; press `Q` again to exit

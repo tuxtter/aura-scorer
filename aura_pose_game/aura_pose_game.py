@@ -151,6 +151,7 @@ SCORE_SMOOTHING_SECONDS = 0.75
 LANDMARK_SMOOTHING_SECONDS = 0.12
 NOISE_CALIBRATION_SECONDS = 3.0
 MISSING_POSE_DECAY_SECONDS = 1.25
+DUEL_DURATION_SECONDS = 90.0
 
 
 class AuraGameCallback(app_callback_class):
@@ -173,6 +174,7 @@ class AuraGameCallback(app_callback_class):
         self.game_state = "playing"
         self.final_score = 0.0
         self.final_duel_result = None
+        self.duel_elapsed = 0.0
         self.duel_players = [DuelPlayerState("PLAYER 1"), DuelPlayerState("PLAYER 2")]
 
     def cycle_difficulty(self):
@@ -200,6 +202,7 @@ class AuraGameCallback(app_callback_class):
         self.game_state = "playing"
         self.final_score = 0.0
         self.final_duel_result = None
+        self.duel_elapsed = 0.0
         self.last_pose = None
         self.last_pose_norm = None
         self.last_update = time.monotonic()
@@ -529,32 +532,52 @@ def _draw_hud(image, score, best_score, width, height, status_message, difficult
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (235, 235, 235), 1)
 
 
-def _draw_duel_hud(image, players, width, height):
-    """Compact translucent score cards in the top corners."""
-    card_width = max(150, min(190, width // 4))
-    card_height = 62
-    margin = 10
-    overlay = image.copy()
-    for index in range(len(players)):
-        x = margin if index == 0 else width - card_width - margin
-        cv2.rectangle(overlay, (x, margin), (x + card_width, margin + card_height), (18, 22, 42), -1)
-    cv2.addWeighted(overlay, 0.45, image, 0.55, 0, image)
+def _draw_duel_hud(image, players, width, height, time_left=DUEL_DURATION_SECONDS):
+    """Street Fighter-style bars: each fills from its screen edge toward a centre timer."""
+    margin = 12
+    box_w, box_h = 84, 52
+    bar_h = 26
+    bar_y = margin
+    centre = width // 2
+    bar_w = centre - box_w // 2 - margin - 6
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    colours = ((255, 170, 70), (90, 220, 255))
+
     for index, player in enumerate(players):
-        x = margin if index == 0 else width - card_width - margin
-        colour = (255, 170, 70) if index == 0 else (90, 220, 255)
-        cv2.rectangle(image, (x, margin), (x + card_width, margin + card_height), colour, 1)
-        cv2.putText(image, f"{player.name}  {player.aura_score:04.1f}", (x + 8, margin + 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        cv2.putText(image, f"BEST {player.best_score:04.1f}", (x + 8, margin + 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (220, 220, 230), 1)
-        bar_x, bar_y, bar_w = x + 8, margin + 48, card_width - 16
-        cv2.rectangle(image, (bar_x, bar_y), (bar_x + bar_w, bar_y + 6), (65, 65, 85), -1)
+        x0 = margin if index == 0 else centre + box_w // 2 + 6
+        x1 = x0 + bar_w
         fill = max(0, min(bar_w, int(bar_w * player.aura_score / 100)))
-        cv2.rectangle(image, (bar_x, bar_y), (bar_x + fill, bar_y + 6), colour, -1)
-    cv2.putText(image, "Q: end", (width - 60, height - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (240, 240, 240), 1)
-    cv2.putText(image, "M: switch to SOLO", (margin, height - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (240, 240, 240), 1)
+        cv2.rectangle(image, (x0 - 3, bar_y - 3), (x1 + 3, bar_y + bar_h + 3), (15, 15, 15), -1)
+        cv2.rectangle(image, (x0, bar_y), (x1, bar_y + bar_h), (45, 40, 40), -1)
+        if fill:
+            fx0, fx1 = (x0, x0 + fill) if index == 0 else (x1 - fill, x1)
+            colour = colours[index]
+            cv2.rectangle(image, (fx0, bar_y), (fx1, bar_y + bar_h), colour, -1)
+            shine = image[bar_y:bar_y + bar_h // 3, fx0:fx1]
+            cv2.addWeighted(shine, 0.65, np.full_like(shine, 255), 0.35, 0, shine)
+        cv2.rectangle(image, (x0 - 3, bar_y - 3), (x1 + 3, bar_y + bar_h + 3), (240, 240, 240), 2)
+
+        label = f"{player.name}  {player.aura_score:04.1f}"
+        (label_w, _), _ = cv2.getTextSize(label, font, 0.55, 2)
+        label_x = x0 if index == 0 else x1 - label_w
+        cv2.putText(image, label, (label_x, bar_y + bar_h + 24), font, 0.55, (0, 0, 0), 4, cv2.LINE_AA)
+        cv2.putText(image, label, (label_x, bar_y + bar_h + 24), font, 0.55, colours[index], 2, cv2.LINE_AA)
+        best = f"BEST {player.best_score:04.1f}"
+        (best_w, _), _ = cv2.getTextSize(best, font, 0.45, 1)
+        best_x = x0 if index == 0 else x1 - best_w
+        cv2.putText(image, best, (best_x, bar_y + bar_h + 44), font, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(image, best, (best_x, bar_y + bar_h + 44), font, 0.45, (235, 235, 235), 2, cv2.LINE_AA)
+
+    bx0 = centre - box_w // 2
+    cv2.rectangle(image, (bx0, margin - 3), (bx0 + box_w, margin - 3 + box_h), (15, 15, 15), -1)
+    cv2.rectangle(image, (bx0, margin - 3), (bx0 + box_w, margin - 3 + box_h), (240, 240, 240), 2)
+    timer_text = f"{int(time_left) // 60}:{int(time_left) % 60:02d}"
+    (text_w, text_h), _ = cv2.getTextSize(timer_text, font, 1.0, 2)
+    cv2.putText(image, timer_text, (centre - text_w // 2, margin - 3 + (box_h + text_h) // 2),
+                font, 1.0, (90, 90, 255) if time_left <= 10 else (255, 255, 255), 2, cv2.LINE_AA)
+
+    cv2.putText(image, "Q: end", (width - 60, height - 10), font, 0.4, (240, 240, 240), 1)
+    cv2.putText(image, "M: switch to SOLO", (margin, height - 10), font, 0.4, (240, 240, 240), 1)
 
 
 def _draw_game_over_screen(image, width, height, score, best_score, reason,
@@ -663,7 +686,15 @@ def app_callback(element, buffer, user_data):
                 cv2.circle(output, point, 8, colour, 2, cv2.LINE_AA)
 
     if user_data.game_state == "playing" and user_data.mode == "duel":
-        _draw_duel_hud(output, user_data.duel_players, width, height)
+        user_data.duel_elapsed += min(frame_delta, 0.5)
+        time_left = max(0.0, DUEL_DURATION_SECONDS - user_data.duel_elapsed)
+        _draw_duel_hud(output, user_data.duel_players, width, height, time_left)
+        if time_left <= 0.0:
+            user_data.trigger_game_over("Time's up!")
+            output = _draw_game_over_screen(
+                output, width, height, user_data.final_score, user_data.best_score,
+                user_data.status_message, user_data.final_duel_result,
+            )
     elif user_data.game_state == "playing":
         _draw_hud(
             output,
