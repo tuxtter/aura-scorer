@@ -189,26 +189,28 @@ def _update_duel_target(player):
 
 
 def _victory_quote(winner, loser):
-    """Pick a Street Fighter-style victory line aimed at the loser's aura."""
-    margin = winner.points - loser.points
+    """Pick a Street Fighter-style victory line citing the points and both auras."""
     rival = loser.name
-    if margin >= 3:
+    score = f"{winner.points} to {loser.points}"
+    win_aura = f"{winner.best_score:.0f}"
+    lose_aura = f"{loser.best_score:.0f}"
+    if winner.points - loser.points >= 3:
         lines = (
-            f"{rival}, your aura is so faint I can barely see it!",
-            f"Is that all, {rival}? Your aura peaked at only {loser.best_score:.0f}!",
-            f"You are not ready, {rival}. Come back when your aura glows!",
+            f"{score}! Your aura peaked at {lose_aura}, {rival}. Mine hit {win_aura}!",
+            f"{score}, {rival}? Your {lose_aura} aura is no match for my {win_aura}!",
+            f"Only {loser.points} points, {rival}? Come back when your aura glows!",
         )
-    elif margin == 1:
+    elif winner.points - loser.points == 1:
         lines = (
-            f"Close one, {rival}! But my aura burned just a little brighter!",
-            f"Your aura reached {loser.best_score:.0f}... not enough to stop me!",
-            f"Nice try, {rival}. Train your aura and challenge me again!",
+            f"{score}! Close, {rival}, but my {win_aura} aura beat your {lose_aura}!",
+            f"One point apart, {rival}! Train that {lose_aura} aura and try again!",
+            f"{score}, {rival}! My aura burned just a little brighter!",
         )
     else:
         lines = (
-            f"Your aura reached {loser.best_score:.0f}, {rival}. Mine reached {winner.best_score:.0f}!",
-            f"{rival}, feel the power of my aura!",
-            f"You fought well, {rival}, but my aura was stronger!",
+            f"{score}, {rival}! My {win_aura} aura outshines your {lose_aura}!",
+            f"{winner.points} points to your {loser.points}, {rival}. Feel my aura!",
+            f"You fought well, {rival}, but {win_aura} aura beats {lose_aura}!",
         )
     return random.choice(lines)
 
@@ -871,25 +873,21 @@ def _draw_game_over_screen(image, width, height, score, best_score, reason,
     cv2.rectangle(overlay, (80, 80), (width - 80, height - 40), (255, 120, 120), 2)
     cv2.putText(overlay, "SESSION ENDED", (110, 170), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 2)
     if duel_result:
-        cv2.putText(overlay, duel_result[0], (110, 215),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 200, 90), 2)
-        cv2.putText(overlay, duel_result[1], (110, 255),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 220, 255), 2)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(overlay, duel_result[0], (110, 215), font, 1.0, (255, 200, 90), 2)
+        cv2.putText(overlay, duel_result[1], (110, 252), font, 0.65, (200, 220, 255), 2)
         quote = duel_result[2] if len(duel_result) > 2 else None
-        y = 295
         if quote:
             speaker, text = quote
-            cv2.putText(overlay, f"{speaker}:", (110, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 90), 2)
-            y += 28
-            for line in _wrap_text(f'"{text}"', width - 220, cv2.FONT_HERSHEY_SIMPLEX, 0.6):
-                cv2.putText(overlay, line, (110, y),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
-                y += 26
-        reason_y = y + 14
-        cv2.putText(overlay, reason, (110, reason_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
-        restart_y = reason_y + 34
+            cv2.putText(overlay, f"{speaker}:", (110, 295), font, 0.8, (255, 200, 90), 2)
+            y = 330
+            for line in _wrap_text(f'"{text}"', width - 220, font, 0.85):
+                cv2.putText(overlay, line, (110, y), font, 0.85, (255, 255, 255), 2, cv2.LINE_AA)
+                y += 34
+        footer_y = height - 55
+        cv2.putText(overlay, f"{reason}  Press R to restart.", (110, footer_y),
+                    font, 0.6, (220, 220, 220), 1)
+        return overlay
     else:
         cv2.putText(overlay, f"FINAL AURA: {score:05.1f}", (110, 235),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 200, 90), 2)
