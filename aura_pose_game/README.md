@@ -24,8 +24,9 @@ the app runs and saved for future launches, including on normal application
 shutdown.
 
 Run a two-player target-scoring challenge with `--mode duel`. The two players
-are assigned by screen position (left and right). A pan de muerto icon marks a
-random target on each player's aura bar; reaching it awards one point and sets
+are assigned by screen position (left and right). A pan de muerto or calaverita
+de azucar icon (chosen at random) marks a random target on each player's aura
+bar; reaching it awards one point and sets
 a new target. The live point totals and current targets are shown below the
 bars.
 The player with the most points wins when the 90-second match timer reaches

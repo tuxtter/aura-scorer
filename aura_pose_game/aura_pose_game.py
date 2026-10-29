@@ -160,6 +160,7 @@ COMBO_SCORE_THRESHOLD = 35.0
 COMBO_REGION_THRESHOLD = 35.0
 DUEL_TARGET_MIN = 20
 DUEL_TARGET_MAX = 85
+DUEL_TARGET_ICONS = ("pan_de_muerto", "calaverita")
 
 
 def _random_duel_target(previous=None):
@@ -170,10 +171,15 @@ def _random_duel_target(previous=None):
     return random.choice(targets)
 
 
+def _random_target_icon():
+    return random.choice(DUEL_TARGET_ICONS)
+
+
 def _update_duel_target(player):
     if player.target_armed and player.aura_score >= player.target_score:
         player.points += 1
         player.target_score = _random_duel_target(player.target_score)
+        player.target_icon = _random_target_icon()
         player.target_armed = False
         player.achievement_message = "TARGET HIT! +1 POINT"
         player.achievement_until = time.monotonic() + 1.5
@@ -374,6 +380,7 @@ class DuelPlayerState:
         _reset_combo_state(self)
         self.points = 0
         self.target_score = _random_duel_target()
+        self.target_icon = _random_target_icon()
         self.target_armed = True
 
 
@@ -610,6 +617,31 @@ def _draw_pan_de_muerto_marker(image, center_x, center_y):
     cv2.circle(image, center, 2, (255, 245, 220), -1, cv2.LINE_AA)
 
 
+def _draw_calaverita_marker(image, center_x, center_y):
+    """Draw a small decorated sugar skull (calaverita de azucar) as the target marker."""
+    skull = (245, 245, 250)
+    outline = (40, 40, 60)
+    cv2.circle(image, (center_x, center_y - 2), 11, skull, -1, cv2.LINE_AA)
+    cv2.rectangle(image, (center_x - 6, center_y + 6), (center_x + 6, center_y + 12),
+                  skull, -1, cv2.LINE_AA)
+    cv2.circle(image, (center_x, center_y - 2), 11, outline, 1, cv2.LINE_AA)
+    for dx in (-5, 5):
+        cv2.circle(image, (center_x + dx, center_y - 3), 3, outline, -1, cv2.LINE_AA)
+        cv2.circle(image, (center_x + dx, center_y - 3), 4, (200, 90, 220), 1, cv2.LINE_AA)
+    cv2.circle(image, (center_x, center_y + 2), 1, outline, -1, cv2.LINE_AA)
+    for dx in (-3, 0, 3):
+        cv2.line(image, (center_x + dx, center_y + 8), (center_x + dx, center_y + 11),
+                 outline, 1, cv2.LINE_AA)
+    cv2.circle(image, (center_x, center_y - 11), 2, (60, 200, 255), -1, cv2.LINE_AA)
+
+
+def _draw_target_marker(image, icon, center_x, center_y):
+    if icon == "calaverita":
+        _draw_calaverita_marker(image, center_x, center_y)
+    else:
+        _draw_pan_de_muerto_marker(image, center_x, center_y)
+
+
 def _draw_hud(image, score, best_score, width, height, status_message, difficulty,
               activity_breakdown, tracking_confidence, challenge, challenge_elapsed,
               challenge_hold_elapsed, challenge_start_best_score, combo_seconds,
@@ -704,7 +736,7 @@ def _draw_duel_hud(image, players, width, height, time_left=DUEL_DURATION_SECOND
             if index == 0
             else x1 - int(bar_w * player.target_score / 100)
         )
-        _draw_pan_de_muerto_marker(image, target_x, bar_y + bar_h // 2)
+        _draw_target_marker(image, player.target_icon, target_x, bar_y + bar_h // 2)
         cv2.rectangle(image, (x0 - 3, bar_y - 3), (x1 + 3, bar_y + bar_h + 3), (240, 240, 240), 2)
 
         label = f"{player.name}  {player.aura_score:04.1f}"
