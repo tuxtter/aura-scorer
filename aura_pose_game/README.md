@@ -23,13 +23,15 @@ score fades until movement is detected again. The best score is retained while
 the app runs and saved for future launches, including on normal application
 shutdown.
 
-Run a two-player best-score challenge with `--mode duel`. The two players are
-assigned by screen position (left and right); their best aura scores are
-compared when the 90-second match timer reaches zero (or earlier if ended with
-`Q`). The countdown is shown at the top of the screen and turns red for the
-last 10 seconds. Enter player names when starting in
-duel mode or switching to duel with `M`; leave a name blank to use its default.
-The end screen shows the winner and their best score, or both scores in a tie.
+Run a two-player target-scoring challenge with `--mode duel`. The two players
+are assigned by screen position (left and right). A random target marker
+appears on each player's aura bar; reaching it awards one point and sets a new
+target. The live point totals and current targets are shown below the bars.
+The player with the most points wins when the 90-second match timer reaches
+zero (or earlier if ended with `Q`). The countdown is shown at the top of the
+screen and turns red for the last 10 seconds. Enter player names when starting
+in duel mode or switching to duel with `M`; leave a name blank to use its
+default. The end screen shows the point totals and each player's best aura.
 
 Start a timed solo challenge:
 

@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import random
 import select
 import signal
 import subprocess
@@ -157,6 +158,28 @@ HOLD_CHALLENGE_SECONDS = 20.0
 HOLD_CHALLENGE_LIMIT_SECONDS = 60.0
 COMBO_SCORE_THRESHOLD = 35.0
 COMBO_REGION_THRESHOLD = 35.0
+DUEL_TARGET_MIN = 20
+DUEL_TARGET_MAX = 85
+
+
+def _random_duel_target(previous=None):
+    targets = [
+        target for target in range(DUEL_TARGET_MIN, DUEL_TARGET_MAX + 1)
+        if target != previous
+    ]
+    return random.choice(targets)
+
+
+def _update_duel_target(player):
+    if player.target_armed and player.aura_score >= player.target_score:
+        player.points += 1
+        player.target_score = _random_duel_target(player.target_score)
+        player.target_armed = False
+        player.achievement_message = "TARGET HIT! +1 POINT"
+        player.achievement_until = time.monotonic() + 1.5
+        _play_sound("success")
+    elif not player.target_armed and player.aura_score < player.target_score:
+        player.target_armed = True
 
 
 def _reset_combo_state(player):
@@ -283,28 +306,29 @@ class AuraGameCallback(app_callback_class):
         logger.info("Restarted aura pose game")
 
     def log_duel_winner(self):
-        """Report the duel result using each player's best session score."""
+        """Report the duel result using points earned by reaching aura targets."""
         player_one, player_two = self.duel_players
-        if abs(player_one.best_score - player_two.best_score) < 0.1:
-            logger.info("1-vs-1 duel ended in a tie: both players scored %.1f",
-                        player_one.best_score)
+        if player_one.points == player_two.points:
+            logger.info("1-vs-1 duel ended in a tie: both players scored %d points",
+                        player_one.points)
             return (
                 "TIE GAME",
-                f"{player_one.name}: {player_one.best_score:.1f}  "
-                f"{player_two.name}: {player_two.best_score:.1f}",
+                f"POINTS {player_one.points} - {player_two.points}  |  "
+                f"BEST AURA {player_one.best_score:.1f} - {player_two.best_score:.1f}",
             )
         else:
-            winner = player_one if player_one.best_score > player_two.best_score else player_two
+            winner = player_one if player_one.points > player_two.points else player_two
             opponent = player_two if winner is player_one else player_one
             logger.info(
-                "1-vs-1 duel winner: %s with %.1f (opponent: %.1f)",
+                "1-vs-1 duel winner: %s with %d points (opponent: %d)",
                 winner.name,
-                winner.best_score,
-                opponent.best_score,
+                winner.points,
+                opponent.points,
             )
             return (
                 f"{winner.name} WINS!",
-                f"ACHIEVED AURA: {winner.best_score:.1f}",
+                f"POINTS {winner.points} - {opponent.points}  |  "
+                f"BEST AURA {winner.best_score:.1f} - {opponent.best_score:.1f}",
             )
 
     def trigger_game_over(self, reason="Session ended"):
@@ -348,6 +372,9 @@ class DuelPlayerState:
         self.activity_breakdown = _empty_breakdown()
         self.tracking_confidence = 0.0
         _reset_combo_state(self)
+        self.points = 0
+        self.target_score = _random_duel_target()
+        self.target_armed = True
 
 
 def _normalized_point(point, bbox):
@@ -656,6 +683,13 @@ def _draw_duel_hud(image, players, width, height, time_left=DUEL_DURATION_SECOND
             cv2.rectangle(image, (fx0, bar_y), (fx1, bar_y + bar_h), colour, -1)
             shine = image[bar_y:bar_y + bar_h // 3, fx0:fx1]
             cv2.addWeighted(shine, 0.65, np.full_like(shine, 255), 0.35, 0, shine)
+        target_x = (
+            x0 + int(bar_w * player.target_score / 100)
+            if index == 0
+            else x1 - int(bar_w * player.target_score / 100)
+        )
+        cv2.line(image, (target_x, bar_y - 7), (target_x, bar_y + bar_h + 7),
+                 (255, 255, 255), 3, cv2.LINE_AA)
         cv2.rectangle(image, (x0 - 3, bar_y - 3), (x1 + 3, bar_y + bar_h + 3), (240, 240, 240), 2)
 
         label = f"{player.name}  {player.aura_score:04.1f}"
@@ -663,15 +697,20 @@ def _draw_duel_hud(image, players, width, height, time_left=DUEL_DURATION_SECOND
         label_x = x0 if index == 0 else x1 - label_w
         cv2.putText(image, label, (label_x, bar_y + bar_h + 24), font, 0.55, (0, 0, 0), 4, cv2.LINE_AA)
         cv2.putText(image, label, (label_x, bar_y + bar_h + 24), font, 0.55, colours[index], 2, cv2.LINE_AA)
+        points_label = f"POINTS {player.points}   TARGET {player.target_score}"
+        (points_w, _), _ = cv2.getTextSize(points_label, font, 0.45, 1)
+        points_x = x0 if index == 0 else x1 - points_w
+        cv2.putText(image, points_label, (points_x, bar_y + bar_h + 44),
+                    font, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
         best = f"BEST {player.best_score:04.1f}"
         (best_w, _), _ = cv2.getTextSize(best, font, 0.45, 1)
         best_x = x0 if index == 0 else x1 - best_w
-        cv2.putText(image, best, (best_x, bar_y + bar_h + 44), font, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(image, best, (best_x, bar_y + bar_h + 44), font, 0.45, (235, 235, 235), 2, cv2.LINE_AA)
+        cv2.putText(image, best, (best_x, bar_y + bar_h + 62), font, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(image, best, (best_x, bar_y + bar_h + 62), font, 0.45, (235, 235, 235), 2, cv2.LINE_AA)
         if player.combo_seconds >= 5.0:
             combo = f"COMBO x{int(player.combo_seconds // 5)}"
             combo_x = x0 if index == 0 else x1 - cv2.getTextSize(combo, font, 0.45, 1)[0][0]
-            cv2.putText(image, combo, (combo_x, bar_y + bar_h + 62),
+            cv2.putText(image, combo, (combo_x, bar_y + bar_h + 80),
                         font, 0.45, colours[index], 1, cv2.LINE_AA)
         if player.achievement_message and time.monotonic() < player.achievement_until:
             achievement_x = x0 if index == 0 else x1 - cv2.getTextSize(
@@ -690,6 +729,8 @@ def _draw_duel_hud(image, players, width, height, time_left=DUEL_DURATION_SECOND
 
     cv2.putText(image, "Q: end", (width - 60, height - 10), font, 0.4, (240, 240, 240), 1)
     cv2.putText(image, "M: switch to SOLO", (margin, height - 10), font, 0.4, (240, 240, 240), 1)
+    cv2.putText(image, "REACH THE MARKER: +1 POINT", (centre - 130, height - 10),
+                font, 0.4, (255, 255, 255), 1)
 
 
 def _draw_game_over_screen(image, width, height, score, best_score, reason,
@@ -774,12 +815,13 @@ def app_callback(element, buffer, user_data):
         for player, candidate in zip(user_data.duel_players, assignments):
             if candidate is None:
                 _decay_player_score(player, frame_delta)
-                continue
-            pose, _ = _update_player_score(
-                player, candidate[0], frame_delta, user_data.difficulty, width, height
-            )
-            pose_draw_data.append((pose, (255, 170, 70) if player is user_data.duel_players[0] else (90, 220, 255)))
-            user_data.best_score = max(user_data.best_score, player.best_score)
+            else:
+                pose, _ = _update_player_score(
+                    player, candidate[0], frame_delta, user_data.difficulty, width, height
+                )
+                pose_draw_data.append((pose, (255, 170, 70) if player is user_data.duel_players[0] else (90, 220, 255)))
+                user_data.best_score = max(user_data.best_score, player.best_score)
+            _update_duel_target(player)
     else:
         user_data.last_pose = None
         if candidates:
