@@ -594,6 +594,22 @@ def _aura_colour(score):
     return tuple(int(value) for value in cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)[0, 0])
 
 
+def _draw_pan_de_muerto_marker(image, center_x, center_y):
+    """Draw a small pan de muerto icon as the duel target marker."""
+    center = (center_x, center_y)
+    cv2.ellipse(image, center, (12, 10), 0, 0, 360, (36, 104, 178), -1, cv2.LINE_AA)
+    cv2.ellipse(image, center, (12, 10), 0, 0, 360, (255, 225, 175), 1, cv2.LINE_AA)
+    bone_color = (245, 220, 185)
+    for start, end in (
+        ((center_x - 8, center_y - 7), (center_x + 8, center_y + 7)),
+        ((center_x + 8, center_y - 7), (center_x - 8, center_y + 7)),
+    ):
+        cv2.line(image, start, end, bone_color, 3, cv2.LINE_AA)
+        for endpoint in (start, end):
+            cv2.circle(image, endpoint, 2, bone_color, -1, cv2.LINE_AA)
+    cv2.circle(image, center, 2, (255, 245, 220), -1, cv2.LINE_AA)
+
+
 def _draw_hud(image, score, best_score, width, height, status_message, difficulty,
               activity_breakdown, tracking_confidence, challenge, challenge_elapsed,
               challenge_hold_elapsed, challenge_start_best_score, combo_seconds,
@@ -688,8 +704,7 @@ def _draw_duel_hud(image, players, width, height, time_left=DUEL_DURATION_SECOND
             if index == 0
             else x1 - int(bar_w * player.target_score / 100)
         )
-        cv2.line(image, (target_x, bar_y - 7), (target_x, bar_y + bar_h + 7),
-                 (255, 255, 255), 3, cv2.LINE_AA)
+        _draw_pan_de_muerto_marker(image, target_x, bar_y + bar_h // 2)
         cv2.rectangle(image, (x0 - 3, bar_y - 3), (x1 + 3, bar_y + bar_h + 3), (240, 240, 240), 2)
 
         label = f"{player.name}  {player.aura_score:04.1f}"

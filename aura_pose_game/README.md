@@ -24,9 +24,10 @@ the app runs and saved for future launches, including on normal application
 shutdown.
 
 Run a two-player target-scoring challenge with `--mode duel`. The two players
-are assigned by screen position (left and right). A random target marker
-appears on each player's aura bar; reaching it awards one point and sets a new
-target. The live point totals and current targets are shown below the bars.
+are assigned by screen position (left and right). A pan de muerto icon marks a
+random target on each player's aura bar; reaching it awards one point and sets
+a new target. The live point totals and current targets are shown below the
+bars.
 The player with the most points wins when the 90-second match timer reaches
 zero (or earlier if ended with `Q`). The countdown is shown at the top of the
 screen and turns red for the last 10 seconds. Enter player names when starting
