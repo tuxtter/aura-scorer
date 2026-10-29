@@ -24,8 +24,8 @@ the app runs and saved for future launches, including on normal application
 shutdown.
 
 Run a two-player target-scoring challenge with `--mode duel`. The two players
-are assigned by screen position (left and right). A pan de muerto or calaverita
-de azucar icon (chosen at random) marks a random target on each player's aura
+are assigned by screen position (left and right). A pan de muerto, calaverita
+de azucar, ghost or pumpkin icon (chosen at random) marks a random target on each player's aura
 bar; reaching it awards one point and sets
 a new target. The live point totals and current targets are shown below the
 bars.
@@ -33,7 +33,8 @@ The player with the most points wins when the 90-second match timer reaches
 zero (or earlier if ended with `Q`). The countdown is shown at the top of the
 screen and turns red for the last 10 seconds. Enter player names when starting
 in duel mode or switching to duel with `M`; leave a name blank to use its
-default. The end screen shows the point totals and each player's best aura.
+default. The end screen shows the point totals and each player's best aura. The winner also delivers a
+Street Fighter-style victory line to the rival that references their aura.
 
 Start a timed solo challenge:
 

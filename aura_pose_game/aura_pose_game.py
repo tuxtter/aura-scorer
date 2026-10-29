@@ -160,7 +160,7 @@ COMBO_SCORE_THRESHOLD = 35.0
 COMBO_REGION_THRESHOLD = 35.0
 DUEL_TARGET_MIN = 20
 DUEL_TARGET_MAX = 85
-DUEL_TARGET_ICONS = ("pan_de_muerto", "calaverita")
+DUEL_TARGET_ICONS = ("pan_de_muerto", "calaverita", "ghost", "pumpkin")
 
 
 def _random_duel_target(previous=None):
@@ -186,6 +186,31 @@ def _update_duel_target(player):
         _play_sound("success")
     elif not player.target_armed and player.aura_score < player.target_score:
         player.target_armed = True
+
+
+def _victory_quote(winner, loser):
+    """Pick a Street Fighter-style victory line aimed at the loser's aura."""
+    margin = winner.points - loser.points
+    rival = loser.name
+    if margin >= 3:
+        lines = (
+            f"{rival}, your aura is so faint I can barely see it!",
+            f"Is that all, {rival}? Your aura peaked at only {loser.best_score:.0f}!",
+            f"You are not ready, {rival}. Come back when your aura glows!",
+        )
+    elif margin == 1:
+        lines = (
+            f"Close one, {rival}! But my aura burned just a little brighter!",
+            f"Your aura reached {loser.best_score:.0f}... not enough to stop me!",
+            f"Nice try, {rival}. Train your aura and challenge me again!",
+        )
+    else:
+        lines = (
+            f"Your aura reached {loser.best_score:.0f}, {rival}. Mine reached {winner.best_score:.0f}!",
+            f"{rival}, feel the power of my aura!",
+            f"You fought well, {rival}, but my aura was stronger!",
+        )
+    return random.choice(lines)
 
 
 def _reset_combo_state(player):
@@ -321,6 +346,7 @@ class AuraGameCallback(app_callback_class):
                 "TIE GAME",
                 f"POINTS {player_one.points} - {player_two.points}  |  "
                 f"BEST AURA {player_one.best_score:.1f} - {player_two.best_score:.1f}",
+                None,
             )
         else:
             winner = player_one if player_one.points > player_two.points else player_two
@@ -335,6 +361,7 @@ class AuraGameCallback(app_callback_class):
                 f"{winner.name} WINS!",
                 f"POINTS {winner.points} - {opponent.points}  |  "
                 f"BEST AURA {winner.best_score:.1f} - {opponent.best_score:.1f}",
+                (winner.name, _victory_quote(winner, opponent)),
             )
 
     def trigger_game_over(self, reason="Session ended"):
@@ -635,9 +662,50 @@ def _draw_calaverita_marker(image, center_x, center_y):
     cv2.circle(image, (center_x, center_y - 11), 2, (60, 200, 255), -1, cv2.LINE_AA)
 
 
+def _draw_ghost_marker(image, center_x, center_y):
+    """Draw a small cartoon ghost as the target marker."""
+    body = np.array([
+        (center_x - 10, center_y + 12), (center_x - 10, center_y - 2),
+        (center_x - 6, center_y - 9), (center_x, center_y - 12),
+        (center_x + 6, center_y - 9), (center_x + 10, center_y - 2),
+        (center_x + 10, center_y + 12), (center_x + 6, center_y + 8),
+        (center_x + 3, center_y + 12), (center_x, center_y + 8),
+        (center_x - 3, center_y + 12), (center_x - 6, center_y + 8),
+    ], dtype=np.int32)
+    cv2.fillPoly(image, [body], (250, 250, 255), cv2.LINE_AA)
+    cv2.polylines(image, [body], True, (200, 190, 180), 1, cv2.LINE_AA)
+    for dx in (-4, 4):
+        cv2.ellipse(image, (center_x + dx, center_y - 3), (2, 3), 0, 0, 360,
+                    (40, 30, 30), -1, cv2.LINE_AA)
+    cv2.ellipse(image, (center_x, center_y + 3), (2, 3), 0, 0, 360,
+                (40, 30, 30), -1, cv2.LINE_AA)
+
+
+def _draw_pumpkin_marker(image, center_x, center_y):
+    """Draw a small jack-o'-lantern as the target marker."""
+    orange = (20, 130, 250)
+    dark_orange = (10, 85, 190)
+    cv2.ellipse(image, (center_x - 6, center_y + 1), (6, 10), 0, 0, 360, orange, -1, cv2.LINE_AA)
+    cv2.ellipse(image, (center_x + 6, center_y + 1), (6, 10), 0, 0, 360, orange, -1, cv2.LINE_AA)
+    cv2.ellipse(image, (center_x, center_y + 1), (6, 11), 0, 0, 360, orange, -1, cv2.LINE_AA)
+    cv2.ellipse(image, (center_x, center_y + 1), (12, 11), 0, 0, 360, dark_orange, 1, cv2.LINE_AA)
+    cv2.rectangle(image, (center_x - 1, center_y - 15), (center_x + 2, center_y - 9),
+                  (40, 140, 50), -1, cv2.LINE_AA)
+    glow = (60, 235, 255)
+    for dx in (-5, 5):
+        eye = np.array([(center_x + dx - 3, center_y + 1), (center_x + dx + 3, center_y + 1),
+                        (center_x + dx, center_y - 4)], dtype=np.int32)
+        cv2.fillPoly(image, [eye], glow, cv2.LINE_AA)
+    cv2.ellipse(image, (center_x, center_y + 5), (6, 4), 0, 0, 180, glow, 2, cv2.LINE_AA)
+
+
 def _draw_target_marker(image, icon, center_x, center_y):
     if icon == "calaverita":
         _draw_calaverita_marker(image, center_x, center_y)
+    elif icon == "ghost":
+        _draw_ghost_marker(image, center_x, center_y)
+    elif icon == "pumpkin":
+        _draw_pumpkin_marker(image, center_x, center_y)
     else:
         _draw_pan_de_muerto_marker(image, center_x, center_y)
 
@@ -780,6 +848,21 @@ def _draw_duel_hud(image, players, width, height, time_left=DUEL_DURATION_SECOND
                 font, 0.4, (255, 255, 255), 1)
 
 
+def _wrap_text(text, max_width, font, scale):
+    """Split text into lines that fit within max_width pixels."""
+    lines, current = [], ""
+    for word in text.split():
+        candidate = f"{current} {word}".strip()
+        if current and cv2.getTextSize(candidate, font, scale, 1)[0][0] > max_width:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines
+
+
 def _draw_game_over_screen(image, width, height, score, best_score, reason,
                            duel_result=None, challenge_summary=""):
     """Render the final summary when the session ends."""
@@ -788,22 +871,36 @@ def _draw_game_over_screen(image, width, height, score, best_score, reason,
     cv2.rectangle(overlay, (80, 80), (width - 80, height - 40), (255, 120, 120), 2)
     cv2.putText(overlay, "SESSION ENDED", (110, 170), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 2)
     if duel_result:
-        cv2.putText(overlay, duel_result[0], (110, 235),
+        cv2.putText(overlay, duel_result[0], (110, 215),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 200, 90), 2)
-        cv2.putText(overlay, duel_result[1], (110, 290),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 220, 255), 2)
+        cv2.putText(overlay, duel_result[1], (110, 255),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 220, 255), 2)
+        quote = duel_result[2] if len(duel_result) > 2 else None
+        y = 295
+        if quote:
+            speaker, text = quote
+            cv2.putText(overlay, f"{speaker}:", (110, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 90), 2)
+            y += 28
+            for line in _wrap_text(f'"{text}"', width - 220, cv2.FONT_HERSHEY_SIMPLEX, 0.6):
+                cv2.putText(overlay, line, (110, y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+                y += 26
+        reason_y = y + 14
+        cv2.putText(overlay, reason, (110, reason_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
+        restart_y = reason_y + 34
     else:
         cv2.putText(overlay, f"FINAL AURA: {score:05.1f}", (110, 235),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 200, 90), 2)
         cv2.putText(overlay, f"BEST SCORE: {best_score:05.1f}", (110, 290),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 220, 255), 2)
-    cv2.putText(overlay, reason, (110, 350), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
-    if challenge_summary:
-        cv2.putText(overlay, challenge_summary, (110, 390),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 210, 120), 1)
-        restart_y = 430
-    else:
+        cv2.putText(overlay, reason, (110, 350), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
         restart_y = 390
+    if challenge_summary:
+        cv2.putText(overlay, challenge_summary, (110, restart_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 210, 120), 1)
+        restart_y += 40
     cv2.putText(overlay, "Press R to restart.", (110, restart_y),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
     return overlay
