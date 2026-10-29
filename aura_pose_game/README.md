@@ -17,10 +17,11 @@ activity and tracking confidence. Landmark smoothing and a short adaptive
 noise calibration reduce score changes caused by tracking jitter; movement is
 normalized to the detected person size.
 
-Solo mode is one continuous session with no countdowns or time limits. Losing
-pose detection does not end the session; the score fades until movement is
-detected again. The best score is retained while the app runs and saved for
-future launches, including on normal application shutdown.
+Standard solo mode, when challenges are off, is one continuous session with no
+countdowns or time limits. Losing pose detection does not end the session; the
+score fades until movement is detected again. The best score is retained while
+the app runs and saved for future launches, including on normal application
+shutdown.
 
 Run a two-player best-score challenge with `--mode duel`. The two players are
 assigned by screen position (left and right); their best aura scores are
@@ -29,6 +30,24 @@ compared when the 90-second match timer reaches zero (or earlier if ended with
 last 10 seconds. Enter player names when starting in
 duel mode or switching to duel with `M`; leave a name blank to use its default.
 The end screen shows the winner and their best score, or both scores in a tie.
+
+Start a timed solo challenge:
+
+```bash
+python3 aura_pose_game.py --input usb --challenge sprint
+python3 aura_pose_game.py --input usb --challenge hold
+```
+
+Sprint challenges give you 30 seconds to beat your saved personal best. Hold
+challenges give you 60 seconds to keep your aura score at 70 or higher for 20
+continuous seconds. Press `C` during solo play to cycle through challenges or
+turn challenges off; changing the challenge starts a fresh run.
+
+Sustained movement across at least two body regions builds a combo. Combo tiers
+increase every five seconds, and combos add a 1%-per-second aura-score bonus
+capped at 10%. Moving four or more regions unlocks a one-time "FULL BODY"
+achievement for the session; the first five-second combo and reaching 85 aura
+also trigger achievements.
 
 ## Requirements
 
@@ -56,6 +75,7 @@ Stand in view of the camera and keep dancing to build your aura. The meter
 changes from "BUILD AURA" to "STRONG AURA" and finally "MAXIMUM AURA".
 
 - `D`: cycle difficulty
+- `C`: cycle solo challenge (off, sprint, hold)
 - `M`: switch between solo and duel mode (starts a fresh run)
 - `R`: restart the session (resets the 90-second duel timer)
 - `Q`: end the session and show the result; press `Q` again to exit

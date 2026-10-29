@@ -152,15 +152,62 @@ LANDMARK_SMOOTHING_SECONDS = 0.12
 NOISE_CALIBRATION_SECONDS = 3.0
 MISSING_POSE_DECAY_SECONDS = 1.25
 DUEL_DURATION_SECONDS = 90.0
+SPRINT_CHALLENGE_SECONDS = 30.0
+HOLD_CHALLENGE_SECONDS = 20.0
+HOLD_CHALLENGE_LIMIT_SECONDS = 60.0
+COMBO_SCORE_THRESHOLD = 35.0
+COMBO_REGION_THRESHOLD = 35.0
+
+
+def _reset_combo_state(player):
+    player.combo_seconds = 0.0
+    player.best_combo_seconds = 0.0
+    player.combo_tier = 0
+    player.achievements = set()
+    player.achievement_message = ""
+    player.achievement_until = 0.0
+
+
+def _award_achievement(player, key, message):
+    if key in player.achievements:
+        return
+    player.achievements.add(key)
+    player.achievement_message = message
+    player.achievement_until = time.monotonic() + 2.5
+    _play_sound("success")
+
+
+def _update_combo(player, dance_score, frame_delta):
+    active_regions = sum(
+        score is not None and score >= COMBO_REGION_THRESHOLD
+        for score in player.activity_breakdown.values()
+    )
+    if dance_score >= COMBO_SCORE_THRESHOLD and active_regions >= 2:
+        player.combo_seconds += min(frame_delta, 0.5)
+        player.best_combo_seconds = max(player.best_combo_seconds, player.combo_seconds)
+    else:
+        player.combo_seconds = 0.0
+
+    tier = int(player.combo_seconds // 5.0)
+    if tier > player.combo_tier:
+        player.combo_tier = tier
+        if tier == 1:
+            _award_achievement(player, "combo_5", "5-SECOND COMBO!")
+    elif tier == 0:
+        player.combo_tier = 0
+
+    if active_regions >= 4:
+        _award_achievement(player, "full_body", "FULL BODY!")
 
 
 class AuraGameCallback(app_callback_class):
     """Stores the smoothed aura score and the live game state."""
 
-    def __init__(self, mode="solo"):
+    def __init__(self, mode="solo", challenge="none"):
         super().__init__()
         self.use_frame = True
         self.mode = mode
+        self.challenge = challenge
         self.aura_score = 0.0
         self.best_score = _load_best_score()
         self.last_pose = None
@@ -175,6 +222,12 @@ class AuraGameCallback(app_callback_class):
         self.final_score = 0.0
         self.final_duel_result = None
         self.duel_elapsed = 0.0
+        self.challenge_elapsed = 0.0
+        self.challenge_hold_elapsed = 0.0
+        self.challenge_start_best_score = self.best_score
+        self.challenge_peak_score = 0.0
+        self.challenge_summary = ""
+        _reset_combo_state(self)
         self.duel_players = [DuelPlayerState("PLAYER 1"), DuelPlayerState("PLAYER 2")]
 
     def cycle_difficulty(self):
@@ -184,6 +237,16 @@ class AuraGameCallback(app_callback_class):
         self.difficulty = order[(current_index + 1) % len(order)]
         self.status_message = f"Difficulty: {self.difficulty.upper()}"
         logger.info("Switched aura difficulty to %s", self.difficulty)
+
+    def cycle_challenge(self):
+        """Rotate solo challenge presets and start a fresh run."""
+        order = ["none", "sprint", "hold"]
+        current_index = order.index(self.challenge)
+        self.challenge = order[(current_index + 1) % len(order)]
+        self.restart_game()
+        label = "OFF" if self.challenge == "none" else self.challenge.upper()
+        self.status_message = f"Challenge: {label}"
+        logger.info("Switched aura challenge to %s", self.challenge)
 
     def toggle_mode(self, player_names=None):
         """Switch between solo and duel, starting a fresh run in the new mode."""
@@ -203,6 +266,12 @@ class AuraGameCallback(app_callback_class):
         self.final_score = 0.0
         self.final_duel_result = None
         self.duel_elapsed = 0.0
+        self.challenge_elapsed = 0.0
+        self.challenge_hold_elapsed = 0.0
+        self.challenge_start_best_score = self.best_score
+        self.challenge_peak_score = 0.0
+        self.challenge_summary = ""
+        _reset_combo_state(self)
         self.last_pose = None
         self.last_pose_norm = None
         self.last_update = time.monotonic()
@@ -278,6 +347,7 @@ class DuelPlayerState:
         self.movement_noise_floor = 0.0
         self.activity_breakdown = _empty_breakdown()
         self.tracking_confidence = 0.0
+        _reset_combo_state(self)
 
 
 def _normalized_point(point, bbox):
@@ -409,13 +479,17 @@ def _update_player_score(player, detection, frame_delta, difficulty, width, heig
     )
     confidence = _pose_confidence(detection, normalized_points, bbox)
     confidence_factor = float(np.clip(confidence / 0.5, 0.0, 1.0))
-    dynamic_score = confidence_factor * dance_score
+    player.activity_breakdown = activity
+    _update_combo(player, dance_score, frame_delta)
+    combo_bonus = min(player.combo_seconds, 10.0) * 0.01
+    dynamic_score = min(100.0, confidence_factor * dance_score * (1.0 + combo_bonus))
     smoothing = 1.0 - math.exp(-frame_delta / SCORE_SMOOTHING_SECONDS)
     player.aura_score = (
         (1.0 - smoothing) * player.aura_score + smoothing * dynamic_score
     )
     player.best_score = max(player.best_score, player.aura_score)
-    player.activity_breakdown = activity
+    if player.aura_score >= 85.0:
+        _award_achievement(player, "maximum_aura", "MAXIMUM AURA!")
     player.tracking_confidence = confidence
     player.last_pose_norm = normalized_points
     player.last_pose = [
@@ -430,6 +504,8 @@ def _decay_player_score(player, frame_delta):
     player.last_pose_norm = None
     player.activity_breakdown = _empty_breakdown()
     player.tracking_confidence = 0.0
+    player.combo_seconds = 0.0
+    player.combo_tier = 0
     player.aura_score *= math.exp(-frame_delta / MISSING_POSE_DECAY_SECONDS)
 
 
@@ -492,7 +568,9 @@ def _aura_colour(score):
 
 
 def _draw_hud(image, score, best_score, width, height, status_message, difficulty,
-              activity_breakdown, tracking_confidence):
+              activity_breakdown, tracking_confidence, challenge, challenge_elapsed,
+              challenge_hold_elapsed, challenge_start_best_score, combo_seconds,
+              achievement_message, achievement_until):
     colour = _aura_colour(score)
     cv2.rectangle(image, (20, 20), (390, 340), (18, 22, 42), -1)
     cv2.rectangle(image, (20, 20), (390, 340), colour, 2)
@@ -526,8 +604,31 @@ def _draw_hud(image, score, best_score, width, height, status_message, difficult
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 210, 255), 1)
     cv2.putText(image, status_message, (width - 290, 145),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1)
-    cv2.putText(image, "M: switch to DUEL", (width - 210, 170),
+    cv2.putText(image, "M: DUEL  C: CHALLENGE", (width - 260, 170),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 230), 1)
+    if challenge == "sprint":
+        time_left = max(0, int(SPRINT_CHALLENGE_SECONDS - challenge_elapsed))
+        challenge_text = (
+            f"SPRINT  0:{time_left:02d}  BEAT BEST {challenge_start_best_score:.1f}"
+        )
+        cv2.putText(image, challenge_text, (width - 370, 198),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 210, 120), 1)
+    elif challenge == "hold":
+        time_left = max(0, int(HOLD_CHALLENGE_LIMIT_SECONDS - challenge_elapsed))
+        clock = f"{time_left // 60}:{time_left % 60:02d}"
+        challenge_text = (
+            f"HOLD  {challenge_hold_elapsed:.0f}/{HOLD_CHALLENGE_SECONDS:.0f}s"
+            f"  {clock}"
+        )
+        cv2.putText(image, challenge_text, (width - 300, 198),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 210, 120), 1)
+    if combo_seconds >= 5.0:
+        cv2.putText(image, f"COMBO x{int(combo_seconds // 5)}  +{min(combo_seconds, 10.0):.0f}%",
+                    (width - 245, height - 55), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.62, (100, 235, 255), 2)
+    if achievement_message and time.monotonic() < achievement_until:
+        cv2.putText(image, achievement_message, (width - 300, height - 85),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.68, (120, 255, 150), 2)
     cv2.putText(image, "Keep moving to build your aura!", (width - 390, height - 25),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (235, 235, 235), 1)
 
@@ -567,6 +668,17 @@ def _draw_duel_hud(image, players, width, height, time_left=DUEL_DURATION_SECOND
         best_x = x0 if index == 0 else x1 - best_w
         cv2.putText(image, best, (best_x, bar_y + bar_h + 44), font, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
         cv2.putText(image, best, (best_x, bar_y + bar_h + 44), font, 0.45, (235, 235, 235), 2, cv2.LINE_AA)
+        if player.combo_seconds >= 5.0:
+            combo = f"COMBO x{int(player.combo_seconds // 5)}"
+            combo_x = x0 if index == 0 else x1 - cv2.getTextSize(combo, font, 0.45, 1)[0][0]
+            cv2.putText(image, combo, (combo_x, bar_y + bar_h + 62),
+                        font, 0.45, colours[index], 1, cv2.LINE_AA)
+        if player.achievement_message and time.monotonic() < player.achievement_until:
+            achievement_x = x0 if index == 0 else x1 - cv2.getTextSize(
+                player.achievement_message, font, 0.45, 1
+            )[0][0]
+            cv2.putText(image, player.achievement_message, (achievement_x, height - 35),
+                        font, 0.45, colours[index], 1, cv2.LINE_AA)
 
     bx0 = centre - box_w // 2
     cv2.rectangle(image, (bx0, margin - 3), (bx0 + box_w, margin - 3 + box_h), (15, 15, 15), -1)
@@ -581,11 +693,11 @@ def _draw_duel_hud(image, players, width, height, time_left=DUEL_DURATION_SECOND
 
 
 def _draw_game_over_screen(image, width, height, score, best_score, reason,
-                           duel_result=None):
+                           duel_result=None, challenge_summary=""):
     """Render the final summary when the session ends."""
     overlay = image.copy()
-    cv2.rectangle(overlay, (80, 80), (width - 80, height - 80), (12, 14, 20), -1)
-    cv2.rectangle(overlay, (80, 80), (width - 80, height - 80), (255, 120, 120), 2)
+    cv2.rectangle(overlay, (80, 80), (width - 80, height - 40), (12, 14, 20), -1)
+    cv2.rectangle(overlay, (80, 80), (width - 80, height - 40), (255, 120, 120), 2)
     cv2.putText(overlay, "SESSION ENDED", (110, 170), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 2)
     if duel_result:
         cv2.putText(overlay, duel_result[0], (110, 235),
@@ -598,7 +710,14 @@ def _draw_game_over_screen(image, width, height, score, best_score, reason,
         cv2.putText(overlay, f"BEST SCORE: {best_score:05.1f}", (110, 290),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 220, 255), 2)
     cv2.putText(overlay, reason, (110, 350), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
-    cv2.putText(overlay, "Press R to restart.", (110, 390), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
+    if challenge_summary:
+        cv2.putText(overlay, challenge_summary, (110, 390),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 210, 120), 1)
+        restart_y = 430
+    else:
+        restart_y = 390
+    cv2.putText(overlay, "Press R to restart.", (110, restart_y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
     return overlay
 
 
@@ -696,17 +815,57 @@ def app_callback(element, buffer, user_data):
                 user_data.status_message, user_data.final_duel_result,
             )
     elif user_data.game_state == "playing":
-        _draw_hud(
-            output,
-            user_data.aura_score,
-            user_data.best_score,
-            width,
-            height,
-            user_data.status_message,
-            user_data.difficulty,
-            user_data.activity_breakdown,
-            user_data.tracking_confidence,
-        )
+        if user_data.challenge != "none":
+            user_data.challenge_elapsed += min(frame_delta, 0.5)
+            user_data.challenge_peak_score = max(
+                user_data.challenge_peak_score, user_data.aura_score
+            )
+            if user_data.challenge == "sprint" and (
+                user_data.challenge_elapsed >= SPRINT_CHALLENGE_SECONDS
+            ):
+                if user_data.challenge_peak_score > user_data.challenge_start_best_score + 0.1:
+                    user_data.challenge_summary = "NEW PERSONAL BEST - CHALLENGE COMPLETE!"
+                    reason = "Challenge complete!"
+                else:
+                    user_data.challenge_summary = "BEST NOT BEAT - TRY AGAIN!"
+                    reason = "Sprint challenge ended."
+                user_data.trigger_game_over(reason)
+            elif user_data.challenge == "hold":
+                if user_data.aura_score >= 70.0:
+                    user_data.challenge_hold_elapsed += min(frame_delta, 0.5)
+                else:
+                    user_data.challenge_hold_elapsed = 0.0
+                if user_data.challenge_hold_elapsed >= HOLD_CHALLENGE_SECONDS:
+                    user_data.challenge_summary = "20-SECOND AURA HOLD COMPLETE!"
+                    user_data.trigger_game_over("Challenge complete!")
+                elif user_data.challenge_elapsed >= HOLD_CHALLENGE_LIMIT_SECONDS:
+                    user_data.challenge_summary = "HOLD NOT COMPLETED - TRY AGAIN!"
+                    user_data.trigger_game_over("Hold challenge ended.")
+
+        if user_data.game_state == "playing":
+            _draw_hud(
+                output,
+                user_data.aura_score,
+                user_data.best_score,
+                width,
+                height,
+                user_data.status_message,
+                user_data.difficulty,
+                user_data.activity_breakdown,
+                user_data.tracking_confidence,
+                user_data.challenge,
+                user_data.challenge_elapsed,
+                user_data.challenge_hold_elapsed,
+                user_data.challenge_start_best_score,
+                user_data.combo_seconds,
+                user_data.achievement_message,
+                user_data.achievement_until,
+            )
+        else:
+            output = _draw_game_over_screen(
+                output, width, height, user_data.final_score, user_data.best_score,
+                user_data.status_message, challenge_summary=user_data.challenge_summary,
+            )
     else:
         output = _draw_game_over_screen(
             output,
@@ -716,6 +875,7 @@ def app_callback(element, buffer, user_data):
             user_data.best_score,
             user_data.status_message,
             user_data.final_duel_result,
+            user_data.challenge_summary,
         )
 
     user_data.set_frame(output)
@@ -785,6 +945,9 @@ class KeyboardController(threading.Thread):
                 else None
             )
             self.user_data.toggle_mode(player_names)
+        elif key in ("c", "C"):
+            if self.user_data.mode == "solo":
+                self.user_data.cycle_challenge()
         elif key in ("r", "R"):
             self.user_data.restart_game()
         elif key in ("q", "Q"):
@@ -842,9 +1005,17 @@ def main():
         default="solo",
         help="Play solo or start a two-player best-score duel.",
     )
+    parser.add_argument(
+        "--challenge",
+        choices=["none", "sprint", "hold"],
+        default="none",
+        help="Start a solo challenge: beat your best in 30 seconds or hold 70 aura for 20 seconds.",
+    )
     args = parser.parse_args()
+    if args.mode == "duel" and args.challenge != "none":
+        parser.error("--challenge can only be used with --mode solo.")
 
-    user_data = AuraGameCallback(mode=args.mode)
+    user_data = AuraGameCallback(mode=args.mode, challenge=args.challenge)
     if args.mode == "duel" and sys.stdin.isatty():
         for player, name in zip(user_data.duel_players, _prompt_player_names()):
             player.name = name
